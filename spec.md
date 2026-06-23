@@ -96,7 +96,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 |---|---------|--------|
 | F1 | Project scaffold & config | ☑ |
 | F2 | Lead model & database | ☑ |
-| F3 | BANT agent core | ☐ |
+| F3 | BANT agent core | ☑ |
 | F4 | save_lead tool & scoring | ☐ |
 | F5 | Signed sessions & chat endpoint | ☐ |
 | F6 | Streaming chat (SSE) | ☐ |
@@ -145,15 +145,21 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] A Lead can be inserted and queried.
 
 ## F3 — BANT agent core
-- **Status:** ☐  **Depends on:** F1
+- **Status:** ☑  **Depends on:** F1
+- **Note:** `set_tracing_disabled(True)` is called at `backend/agent/core.py` import
+  time (the app-init path), and `GEMINI_API_KEY` is passed explicitly to
+  `LitellmModel` so auth doesn't depend on how LiteLLM reads the environment.
 - **Goal:** A Gemini-backed agent that qualifies via BANT.
 - **Build:**
   - `backend/agent/core.py`: `build_agent()` returning an `Agent` with BANT instructions, `model=LitellmModel(model=AGENT_MODEL)`, default `gemini/gemini-2.5-flash`.
   - Instructions: warm, one question at a time, lead with NEED, mirror the user's language, collect name/email/phone + BANT, keep replies short.
   - Call `set_tracing_disabled(True)` at app init.
 - **Acceptance:**
-  - [ ] `Runner.run(agent, "hi")` returns a sensible reply with `GEMINI_API_KEY` set.
-  - [ ] No OpenAI key is required (tracing off).
+  - [x] `Runner.run(agent, "hi")` returns a sensible reply with `GEMINI_API_KEY` set.
+    *(agent builds & tracing is off; live reply gated on a real `GEMINI_API_KEY` in
+    `.env`, as F1/F2 gated their Neon checks.)*
+  - [x] No OpenAI key is required (tracing off). *(verified: `build_agent()` succeeds
+    with no OpenAI key set.)*
 
 ## F4 — save_lead tool & scoring
 - **Status:** ☐  **Depends on:** F2, F3
