@@ -1,0 +1,315 @@
+"use client";
+
+import { AnimatePresence, motion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
+
+type Role = "user" | "bot";
+interface Message {
+  role: Role;
+  text: string;
+}
+
+interface ChatWidgetProps {
+  /** Base URL of the FastAPI backend, e.g. http://localhost:8000. */
+  apiBaseUrl: string;
+  /** First bot bubble shown when the widget opens. */
+  greeting?: string;
+  /** Name shown in the header. */
+  brandName?: string;
+}
+
+const DEFAULT_GREETING = "Hi there 👋 I'm here to help. What brings you in today?";
+const DEFAULT_BRAND = "Honeycomb";
+
+// localStorage key for the signed session token. One thread per browser (the spec's
+// "one lead per visitor"); F12 layers conversation persistence on top of this.
+const SESSION_KEY = "lead_session";
+
+// Shown if the network request itself fails before any tokens stream (the backend
+// already turns provider errors into a friendly streamed reply, HTTP 200).
+const FALLBACK = "Sorry — I hit a snag just now. Could you try again in a moment?";
+
+/**
+ * Attribution read from the browser. Only non-empty values are returned so we never
+ * overwrite a stored Lead column with an empty string — this mirrors the backend's
+ * `ChatRequest.source()`, which drops blanks before persisting on first save.
+ */
+function getSource(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const params = new URLSearchParams(window.location.search);
+  const candidates: Record<string, string> = {
+    page_url: window.location.href,
+    referrer: document.referrer,
+    utm_source: params.get("utm_source") ?? "",
+    utm_medium: params.get("utm_medium") ?? "",
+    utm_campaign: params.get("utm_campaign") ?? "",
+  };
+  return Object.fromEntries(Object.entries(candidates).filter(([, v]) => v));
+}
+
+/** Mint (or reuse) a signed session token. */
+async function fetchSession(apiBaseUrl: string): Promise<string> {
+  const existing = localStorage.getItem(SESSION_KEY);
+  if (existing) return existing;
+  const res = await fetch(`${apiBaseUrl}/session`, { method: "POST" });
+  if (!res.ok) throw new Error(`session mint failed: ${res.status}`);
+  const data: { session_id: string } = await res.json();
+  localStorage.setItem(SESSION_KEY, data.session_id);
+  return data.session_id;
+}
+
+/**
+ * Parse the SSE stream the backend serves over POST (so EventSource can't be used).
+ * Frames are `data: {...}\n\n`; we buffer across chunks, emit each `delta`, and stop
+ * on the terminal `{done:true}` frame.
+ */
+async function readStream(
+  res: Response,
+  onDelta: (delta: string) => void,
+): Promise<void> {
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? ""; // keep the trailing partial frame for next chunk
+    for (const frame of frames) {
+      const line = frame.trim();
+      if (!line.startsWith("data:")) continue;
+      const payload = JSON.parse(line.slice(5).trim());
+      if (payload.done) return;
+      if (typeof payload.delta === "string") onDelta(payload.delta);
+    }
+  }
+}
+
+export default function ChatWidget({
+  apiBaseUrl,
+  greeting = DEFAULT_GREETING,
+  brandName = DEFAULT_BRAND,
+}: ChatWidgetProps) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([
+    { role: "bot", text: greeting },
+  ]);
+  const [input, setInput] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  const sessionId = useRef<string | null>(null);
+  // Dedupe concurrent mints (React StrictMode double-invokes effects in dev).
+  const sessionPromise = useRef<Promise<string> | null>(null);
+  const scrollAnchor = useRef<HTMLDivElement | null>(null);
+
+  const ensureSession = (): Promise<string> => {
+    if (!sessionPromise.current) {
+      sessionPromise.current = fetchSession(apiBaseUrl).then((sid) => {
+        sessionId.current = sid;
+        return sid;
+      });
+    }
+    return sessionPromise.current;
+  };
+
+  // Mint the session as soon as the widget loads, so the first message is instant.
+  useEffect(() => {
+    ensureSession().catch(() => {
+      /* swallowed; a failed mint surfaces when the visitor sends a message */
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the latest message in view as replies stream in.
+  useEffect(() => {
+    scrollAnchor.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, open]);
+
+  const send = async (raw: string) => {
+    const text = raw.trim();
+    if (!text || isStreaming) return;
+    setInput("");
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", text },
+      { role: "bot", text: "" }, // placeholder the stream fills in
+    ]);
+    setIsStreaming(true);
+    try {
+      const sid = await ensureSession();
+      const res = await fetch(`${apiBaseUrl}/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid, message: text, ...getSource() }),
+      });
+      if (!res.ok) throw new Error(`chat failed: ${res.status}`);
+      await readStream(res, (delta) => {
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          next[next.length - 1] = { role: "bot", text: last.text + delta };
+          return next;
+        });
+      });
+    } catch {
+      // Only replace the bubble if nothing streamed; keep a partial reply otherwise.
+      setMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last.role === "bot" && last.text === "") {
+          next[next.length - 1] = { role: "bot", text: FALLBACK };
+        }
+        return next;
+      });
+    } finally {
+      setIsStreaming(false);
+    }
+  };
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void send(input);
+  };
+
+  // Typing dots show while we're awaiting the first token of a reply.
+  const awaitingReply =
+    isStreaming &&
+    messages.length > 0 &&
+    messages[messages.length - 1].role === "bot" &&
+    messages[messages.length - 1].text === "";
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-4">
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            key="panel"
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 260, damping: 24 }}
+            className="flex h-[32rem] w-[22rem] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-2xl bg-cream shadow-2xl ring-1 ring-black/5"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between bg-forest px-4 py-3 text-cream">
+              <span className="font-display text-lg font-semibold">{brandName}</span>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="Close chat"
+                className="rounded-full p-1 text-cream/80 transition hover:bg-white/10 hover:text-cream"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            {/* Messages */}
+            <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+              {messages.map((m, i) => (
+                <MessageBubble key={i} role={m.role} text={m.text} />
+              ))}
+              {awaitingReply && <TypingDots />}
+              <div ref={scrollAnchor} />
+            </div>
+
+            {/* Composer */}
+            <form
+              onSubmit={onSubmit}
+              className="flex items-center gap-2 border-t border-black/5 bg-cream px-3 py-3"
+            >
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Type a message…"
+                className="flex-1 rounded-full border border-black/10 bg-white px-4 py-2 text-sm text-forest outline-none placeholder:text-forest/40 focus:border-honey"
+              />
+              <button
+                type="submit"
+                disabled={!input.trim() || isStreaming}
+                aria-label="Send message"
+                className="grid h-9 w-9 place-items-center rounded-full bg-forest text-cream transition hover:bg-forest/90 disabled:opacity-40"
+              >
+                <SendIcon />
+              </button>
+            </form>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Launcher */}
+      <motion.button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        aria-label={open ? "Close chat" : "Open chat"}
+        aria-expanded={open}
+        className="grid h-14 w-14 place-items-center rounded-full bg-forest text-cream shadow-lg"
+      >
+        {open ? <CloseIcon /> : <ChatIcon />}
+      </motion.button>
+    </div>
+  );
+}
+
+function MessageBubble({ role, text }: Message) {
+  const isUser = role === "user";
+  return (
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`max-w-[80%] whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
+          isUser
+            ? "rounded-br-sm bg-honey text-forest"
+            : "rounded-bl-sm bg-sage text-forest"
+        }`}
+      >
+        {text}
+      </div>
+    </div>
+  );
+}
+
+function TypingDots() {
+  return (
+    <div className="flex justify-start">
+      <div className="flex gap-1 rounded-2xl rounded-bl-sm bg-sage px-3.5 py-3">
+        {[0, 1, 2].map((i) => (
+          <motion.span
+            key={i}
+            className="h-1.5 w-1.5 rounded-full bg-forest/50"
+            animate={{ opacity: [0.3, 1, 0.3] }}
+            transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ChatIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  );
+}

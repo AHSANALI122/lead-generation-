@@ -104,7 +104,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F8 | Rate limiting & CORS | ☑ |
 | F9 | Email notifications | ☑ |
 | F10 | Admin leads API (auth) | ☑ |
-| F11 | Chat widget (frontend base) | ☐ |
+| F11 | Chat widget (frontend base) | ☑ |
 | F12 | Widget UX polish | ☐ |
 | F13 | Admin dashboard (frontend) | ☐ |
 | F14 | LLM guardrails | ☐ |
@@ -286,7 +286,21 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] Over the limit → 429. *(31st request within the minute returns the friendly 429.)*
 
 ## F11 — Chat widget (frontend base)
-- **Status:** ☐  **Depends on:** F6
+- **Status:** ☑  **Depends on:** F6
+- **Note:** Scaffolded with `create-next-app@latest` → Next 16 / React 19 / **Tailwind
+  v4** (CSS-first config: brand palette + fonts live in `@theme` in `app/globals.css`,
+  no `tailwind.config.ts`). Fonts via `next/font/google` (Fraunces display + Inter
+  body) wired to `font-display`/`font-body` utilities. The backend serves SSE over
+  **POST**, so `EventSource` can't be used — the widget streams with `fetch` +
+  `response.body.getReader()` and a small frame parser (`readStream`) that buffers
+  partial frames and stops on `{done:true}`. `getSource()` mirrors the backend's
+  `source()` (drops blanks). Session minting is deduped via a promise ref (React 19
+  StrictMode double-invokes effects). Verified end-to-end against the live backend:
+  `/session` mints a token and `/chat/stream` returns `delta` frames then `done`; the
+  request carried all source params. Live LLM *text* is gated on Neon being reachable
+  (the agent's SDK session needs the async DB) — in this run Neon's host failed DNS, so
+  the backend streamed its friendly fallback, which the widget rendered correctly. Same
+  external gating as F2–F6.
 - **Goal:** A floating chat widget that talks to the backend.
 - **Build:**
   - `npx create-next-app@latest frontend` (TypeScript + Tailwind, App Router); add `framer-motion`.
@@ -294,8 +308,11 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - Render `<ChatWidget apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL!} />` from `app/page.tsx`.
   - Design: forest `#1B4332` header/launcher, honey `#E0A458` user bubbles, cream `#FBF8F3` surface, sage `#EDEFE9` bot bubbles; Fraunces (display) + Inter (body).
 - **Acceptance:**
-  - [ ] Widget opens, sends a message, and renders a streamed reply.
-  - [ ] Source params are included in the request.
+  - [x] Widget opens, sends a message, and renders a streamed reply. *(streaming path
+    verified against the live backend; the rendered reply was the backend's fallback
+    because Neon was unreachable — widget behaviour is correct either way.)*
+  - [x] Source params are included in the request. *(page_url, referrer, utm_* sent in
+    the `/chat/stream` body and accepted by the backend.)*
 
 ## F12 — Widget UX polish
 - **Status:** ☐  **Depends on:** F11
