@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
 type Role = "user" | "bot";
@@ -16,14 +16,21 @@ interface ChatWidgetProps {
   greeting?: string;
   /** Name shown in the header. */
   brandName?: string;
+  /** Quick-reply chips shown before the first user message (F12). */
+  suggestions?: string[];
+  /** Seconds of inactivity before a proactive nudge appears (0/undefined = off, F12). */
+  nudgeAfter?: number;
 }
 
 const DEFAULT_GREETING = "Hi there 👋 I'm here to help. What brings you in today?";
 const DEFAULT_BRAND = "Honeycomb";
 
 // localStorage key for the signed session token. One thread per browser (the spec's
-// "one lead per visitor"); F12 layers conversation persistence on top of this.
+// "one lead per visitor").
 const SESSION_KEY = "lead_session";
+// Conversation history is persisted under a key namespaced by the session token, so a
+// re-minted session (the 401 path) naturally starts a fresh thread (F12).
+const chatKey = (token: string) => `lead_chat:${token}`;
 
 // Shown if the network request itself fails before any tokens stream (the backend
 // already turns provider errors into a friendly streamed reply, HTTP 200).
@@ -47,10 +54,11 @@ function getSource(): Record<string, string> {
   return Object.fromEntries(Object.entries(candidates).filter(([, v]) => v));
 }
 
-/** Mint (or reuse) a signed session token. */
-async function fetchSession(apiBaseUrl: string): Promise<string> {
-  const existing = localStorage.getItem(SESSION_KEY);
-  if (existing) return existing;
+/**
+ * Mint a fresh signed session token. `forceNew` drops any stored token first — used by
+ * the 401 self-heal when the existing token no longer verifies (F12).
+ */
+async function mintSession(apiBaseUrl: string): Promise<string> {
   const res = await fetch(`${apiBaseUrl}/session`, { method: "POST" });
   if (!res.ok) throw new Error(`session mint failed: ${res.status}`);
   const data: { session_id: string } = await res.json();
@@ -91,6 +99,8 @@ export default function ChatWidget({
   apiBaseUrl,
   greeting = DEFAULT_GREETING,
   brandName = DEFAULT_BRAND,
+  suggestions = [],
+  nudgeAfter,
 }: ChatWidgetProps) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -98,20 +108,63 @@ export default function ChatWidget({
   ]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [showNudge, setShowNudge] = useState(false);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
 
-  const sessionId = useRef<string | null>(null);
   // Dedupe concurrent mints (React StrictMode double-invokes effects in dev).
   const sessionPromise = useRef<Promise<string> | null>(null);
   const scrollAnchor = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const launcherRef = useRef<HTMLButtonElement | null>(null);
+  const wasOpen = useRef(false);
+  const hydratedFor = useRef<string | null>(null); // token we've loaded history for
+  const dirty = useRef(false); // only persist after a real user action
+  const nudgeDone = useRef(false);
 
-  const ensureSession = (): Promise<string> => {
+  const reduce = useReducedMotion();
+
+  const ensureSession = (forceNew = false): Promise<string> => {
+    if (forceNew) {
+      sessionPromise.current = null;
+      localStorage.removeItem(SESSION_KEY);
+    }
     if (!sessionPromise.current) {
-      sessionPromise.current = fetchSession(apiBaseUrl).then((sid) => {
-        sessionId.current = sid;
+      const existing = forceNew ? null : localStorage.getItem(SESSION_KEY);
+      sessionPromise.current = (
+        existing ? Promise.resolve(existing) : mintSession(apiBaseUrl)
+      ).then((sid) => {
+        setSessionToken(sid);
+        hydrate(sid);
         return sid;
       });
     }
     return sessionPromise.current;
+  };
+
+  // Restore any persisted conversation for this token, once (F12). Runs in the session
+  // resolution callback (not an effect body), and before any user action sets `dirty`,
+  // so the persist effect below never clobbers stored history with the bare greeting.
+  const hydrate = (token: string) => {
+    if (hydratedFor.current === token) return;
+    hydratedFor.current = token;
+    try {
+      const stored = localStorage.getItem(chatKey(token));
+      if (stored) {
+        const parsed = JSON.parse(stored) as Message[];
+        if (Array.isArray(parsed) && parsed.length) setMessages(parsed);
+      }
+    } catch {
+      /* ignore corrupt storage */
+    }
+  };
+
+  const openPanel = () => {
+    setShowNudge(false);
+    setOpen(true);
+  };
+  const toggleOpen = () => {
+    setShowNudge(false);
+    setOpen((v) => !v);
   };
 
   // Mint the session as soon as the widget loads, so the first message is instant.
@@ -122,14 +175,54 @@ export default function ChatWidget({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Persist after a settled exchange (skip the hydration commit and mid-stream churn).
+  useEffect(() => {
+    if (!dirty.current || !sessionToken || isStreaming) return;
+    try {
+      localStorage.setItem(chatKey(sessionToken), JSON.stringify(messages));
+    } catch {
+      /* storage full / unavailable — non-fatal */
+    }
+  }, [messages, sessionToken, isStreaming]);
+
   // Keep the latest message in view as replies stream in.
   useEffect(() => {
-    scrollAnchor.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, open]);
+    scrollAnchor.current?.scrollIntoView({
+      behavior: reduce ? "auto" : "smooth",
+    });
+  }, [messages, open, reduce]);
+
+  // Escape closes the panel (F12 a11y).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  // Focus to the input on open, back to the launcher on close (F12 a11y).
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+    else if (wasOpen.current) launcherRef.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
+
+  // Proactive nudge: fire once after `nudgeAfter` seconds if still closed (F12).
+  useEffect(() => {
+    if (!nudgeAfter || open || nudgeDone.current) return;
+    const t = setTimeout(() => {
+      nudgeDone.current = true;
+      setShowNudge(true);
+    }, nudgeAfter * 1000);
+    return () => clearTimeout(t);
+  }, [nudgeAfter, open]);
 
   const send = async (raw: string) => {
     const text = raw.trim();
     if (!text || isStreaming) return;
+    dirty.current = true;
     setInput("");
     setMessages((prev) => [
       ...prev,
@@ -137,13 +230,22 @@ export default function ChatWidget({
       { role: "bot", text: "" }, // placeholder the stream fills in
     ]);
     setIsStreaming(true);
-    try {
-      const sid = await ensureSession();
-      const res = await fetch(`${apiBaseUrl}/chat/stream`, {
+
+    const stream = (token: string) =>
+      fetch(`${apiBaseUrl}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sid, message: text, ...getSource() }),
+        body: JSON.stringify({ session_id: token, message: text, ...getSource() }),
       });
+
+    try {
+      let sid = await ensureSession();
+      let res = await stream(sid);
+      // 401 self-heal: the token no longer verifies — re-mint once and retry (F12).
+      if (res.status === 401) {
+        sid = await ensureSession(true);
+        res = await stream(sid);
+      }
       if (!res.ok) throw new Error(`chat failed: ${res.status}`);
       await readStream(res, (delta) => {
         setMessages((prev) => {
@@ -180,21 +282,44 @@ export default function ChatWidget({
     messages[messages.length - 1].role === "bot" &&
     messages[messages.length - 1].text === "";
 
+  // Chips show only before the visitor's first message.
+  const showChips =
+    suggestions.length > 0 && !messages.some((m) => m.role === "user");
+
+  const panelMotion = reduce
+    ? {
+        initial: { opacity: 0 },
+        animate: { opacity: 1 },
+        exit: { opacity: 0 },
+        transition: { duration: 0.15 },
+      }
+    : {
+        initial: { opacity: 0, y: 20, scale: 0.95 },
+        animate: { opacity: 1, y: 0, scale: 1 },
+        exit: { opacity: 0, y: 20, scale: 0.95 },
+        transition: { type: "spring" as const, stiffness: 260, damping: 24 },
+      };
+
   return (
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-4">
       <AnimatePresence>
         {open && (
           <motion.div
             key="panel"
-            initial={{ opacity: 0, y: 20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            transition={{ type: "spring", stiffness: 260, damping: 24 }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="chat-widget-title"
+            {...panelMotion}
             className="flex h-[32rem] w-[22rem] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-2xl bg-cream shadow-2xl ring-1 ring-black/5"
           >
             {/* Header */}
             <div className="flex items-center justify-between bg-forest px-4 py-3 text-cream">
-              <span className="font-display text-lg font-semibold">{brandName}</span>
+              <span
+                id="chat-widget-title"
+                className="font-display text-lg font-semibold"
+              >
+                {brandName}
+              </span>
               <button
                 type="button"
                 onClick={() => setOpen(false)}
@@ -206,11 +331,31 @@ export default function ChatWidget({
             </div>
 
             {/* Messages */}
-            <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <div
+              role="log"
+              aria-live="polite"
+              aria-atomic="false"
+              className="flex-1 space-y-3 overflow-y-auto px-4 py-4"
+            >
               {messages.map((m, i) => (
                 <MessageBubble key={i} role={m.role} text={m.text} />
               ))}
-              {awaitingReply && <TypingDots />}
+              {awaitingReply && <TypingDots reduce={!!reduce} />}
+
+              {showChips && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {suggestions.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => void send(s)}
+                      className="rounded-full border border-forest/20 bg-white px-3 py-1.5 text-xs font-medium text-forest transition hover:border-honey hover:bg-honey/10"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div ref={scrollAnchor} />
             </div>
 
@@ -220,9 +365,11 @@ export default function ChatWidget({
               className="flex items-center gap-2 border-t border-black/5 bg-cream px-3 py-3"
             >
               <input
+                ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Type a message…"
+                aria-label="Message"
                 className="flex-1 rounded-full border border-black/10 bg-white px-4 py-2 text-sm text-forest outline-none placeholder:text-forest/40 focus:border-honey"
               />
               <button
@@ -238,12 +385,42 @@ export default function ChatWidget({
         )}
       </AnimatePresence>
 
+      {/* Proactive nudge */}
+      <AnimatePresence>
+        {showNudge && !open && (
+          <motion.div
+            key="nudge"
+            initial={reduce ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="flex max-w-[16rem] items-start gap-2 rounded-2xl rounded-br-sm bg-white px-4 py-3 text-sm text-forest shadow-xl ring-1 ring-black/5"
+          >
+            <button
+              type="button"
+              onClick={openPanel}
+              className="text-left leading-snug"
+            >
+              Need a hand? I can answer questions and point you the right way. 🍯
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowNudge(false)}
+              aria-label="Dismiss"
+              className="-mr-1 -mt-1 shrink-0 rounded-full p-1 text-forest/40 transition hover:text-forest"
+            >
+              <CloseIcon />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Launcher */}
       <motion.button
+        ref={launcherRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        whileHover={{ scale: 1.05 }}
-        whileTap={{ scale: 0.95 }}
+        onClick={toggleOpen}
+        whileHover={reduce ? undefined : { scale: 1.05 }}
+        whileTap={reduce ? undefined : { scale: 0.95 }}
         aria-label={open ? "Close chat" : "Open chat"}
         aria-expanded={open}
         className="grid h-14 w-14 place-items-center rounded-full bg-forest text-cream shadow-lg"
@@ -271,7 +448,7 @@ function MessageBubble({ role, text }: Message) {
   );
 }
 
-function TypingDots() {
+function TypingDots({ reduce }: { reduce: boolean }) {
   return (
     <div className="flex justify-start">
       <div className="flex gap-1 rounded-2xl rounded-bl-sm bg-sage px-3.5 py-3">
@@ -279,8 +456,10 @@ function TypingDots() {
           <motion.span
             key={i}
             className="h-1.5 w-1.5 rounded-full bg-forest/50"
-            animate={{ opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+            animate={reduce ? undefined : { opacity: [0.3, 1, 0.3] }}
+            transition={
+              reduce ? undefined : { duration: 1, repeat: Infinity, delay: i * 0.2 }
+            }
           />
         ))}
       </div>

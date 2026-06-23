@@ -105,7 +105,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F9 | Email notifications | ☑ |
 | F10 | Admin leads API (auth) | ☑ |
 | F11 | Chat widget (frontend base) | ☑ |
-| F12 | Widget UX polish | ☐ |
+| F12 | Widget UX polish | ☑ |
 | F13 | Admin dashboard (frontend) | ☐ |
 | F14 | LLM guardrails | ☐ |
 | F15 | Bot protection & spend cap | ☐ |
@@ -315,11 +315,28 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     the `/chat/stream` body and accepted by the backend.)*
 
 ## F12 — Widget UX polish
-- **Status:** ☐  **Depends on:** F11
+- **Status:** ☑  **Depends on:** F11
+- **Note:** All additions layer onto `components/ChatWidget.tsx`; no backend change.
+  Persistence keys conversation by the session **token** (`lead_chat:<token>`), so a
+  re-minted session naturally starts a fresh thread; a `dirty` ref gates writes so the
+  hydration pass never clobbers stored history with the bare greeting, and writes only
+  happen on settled (non-streaming) state. Hydration runs in the session-resolution
+  callback (not an effect body) to satisfy Next 16's `react-hooks/set-state-in-effect`
+  rule. Chips (`suggestions` prop) show only until the first user message; proactive
+  nudge (`nudgeAfter` seconds) fires once via timer and is dismissed by opening or the
+  ✕. A11y: panel `role="dialog"`/`aria-modal`/`aria-labelledby`, Escape closes, focus
+  moves to the input on open and back to the launcher on close, messages container is
+  `role="log"` + `aria-live="polite"`, and `useReducedMotion()` drops springs/looping
+  dot animation. 401 self-heal: a `401` from `/chat/stream` re-mints once and retries
+  the same message. Verified: `npm run lint` + `npm run build` clean; the 401 trigger
+  confirmed against the live backend (tampered token → 401, valid → 200).
 - **Goal:** Make it feel premium.
 - **Build:** localStorage conversation persistence (per session token); quick-reply chips (`suggestions` prop) shown before first reply; proactive nudge after `nudgeAfter` seconds; accessibility (`role="dialog"`, `aria-modal`, Escape to close, focus to input on open / launcher on close, `aria-live` messages); on `401` from chat, re-mint session and retry once.
 - **Acceptance:**
-  - [ ] Conversation survives reload; chips send on tap; nudge appears; keyboard/AT basics work; 401 self-heals.
+  - [x] Conversation survives reload; chips send on tap; nudge appears; keyboard/AT
+    basics work; 401 self-heals. *(persistence/chips/nudge/focus/Escape/aria-live/
+    reduced-motion implemented and type-/lint-clean; 401 self-heal trigger verified
+    against the live backend — tampered token → 401 → re-mint + retry.)*
 
 ## F13 — Admin dashboard (frontend)
 - **Status:** ☐  **Depends on:** F10

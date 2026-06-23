@@ -16,7 +16,15 @@ export default function Home() {
         </p>
       </div>
 
-      <ChatWidget apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL!} />
+      <ChatWidget
+        apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL!}
+        suggestions={[
+          "I'm exploring options",
+          "I need pricing",
+          "Book a demo",
+        ]}
+        nudgeAfter={15}
+      />
     </main>
   );
 }
