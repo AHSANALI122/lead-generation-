@@ -1,0 +1,310 @@
+# Lead-Gen Chatbot — Feature Spec
+
+A conversational lead-generation assistant: it chats with website visitors,
+qualifies them with **BANT** (Budget, Authority, Need, Timeline), stores leads in
+Neon Postgres, emails an alert on each qualified lead, and shows everything in an
+admin dashboard.
+
+This spec is **feature-wise**: build one feature per session, in order, unless the
+user says otherwise. Each feature is self-contained with its own acceptance
+criteria. Update the **Status** of a feature when it's done.
+
+---
+
+## Shared context (read once, applies to every feature)
+
+### Stack
+- **Backend:** uv, FastAPI, SQLModel, OpenAI Agents SDK + LiteLLM (Gemini free tier).
+- **DB:** Neon (Postgres) — two URLs for the same DB: sync (`+psycopg`) and async (`+asyncpg`).
+- **Frontend:** Next.js (App Router) + TypeScript + Tailwind + Framer Motion.
+- **Model:** `gemini/gemini-2.5-flash` via `AGENT_MODEL`; tracing disabled.
+
+### Architecture
+```
+Browser → ChatWidget ──POST /chat/stream (SSE)──► FastAPI
+                                                   ├─ Agents SDK (Gemini via LiteLLM)
+                                                   │    tool: save_lead → Neon (Lead)
+                                                   │    memory: SQLAlchemySession → Neon
+                                                   └─ notify.py → SMTP email
+Admin → LeadsDashboard ──GET /leads (Bearer token)──► FastAPI → Neon
+```
+
+### Project structure
+```
+lead-bot/
+├─ backend/
+│  ├─ main.py            # app, routes, CORS, rate limit, auth, errors
+│  ├─ db.py              # sync + async engines, create_db_and_tables
+│  ├─ models.py          # Lead
+│  ├─ schemas.py         # ChatRequest / ChatResponse
+│  ├─ notify.py          # SMTP email
+│  └─ agent/
+│     ├─ core.py         # build_agent + BANT instructions
+│     └─ tools.py        # save_lead, ChatContext, compute_score
+└─ frontend/                  # Next.js app (App Router)
+   ├─ app/
+   │  ├─ layout.tsx
+   │  ├─ page.tsx             # demo/host page rendering <ChatWidget/>
+   │  └─ admin/page.tsx       # SERVER component: authed /leads fetch (token stays server-side)
+   └─ components/
+      ├─ ChatWidget.tsx       # "use client"
+      └─ LeadsDashboard.tsx   # "use client"; receives leads as props
+```
+
+### Data model — `Lead` (one row per session, upserted)
+| Field | Type | Source |
+|-------|------|--------|
+| id | int PK | auto |
+| session_id | str unique index | client (verified) |
+| name, email, phone | str? | agent |
+| budget, authority, need, timeline | str? | agent |
+| qualified | bool | agent (sticky) |
+| score | int 0–100 | computed |
+| notes | str? | agent |
+| page_url, referrer, utm_source/medium/campaign | str? | client |
+| created_at, updated_at | datetime | server |
+
+Conversation history is stored by the SDK in `agent_sessions`/`agent_messages`
+(auto-created), keyed by the bare session id.
+
+### Environment variables
+**Backend** (`.env`): `GEMINI_API_KEY`, `AGENT_MODEL`, `DATABASE_URL`,
+`ASYNC_DATABASE_URL`, `ADMIN_TOKEN`, `SESSION_SECRET`, `ALLOWED_ORIGINS`,
+`CHAT_RATE_LIMIT`, and SMTP: `SMTP_HOST/PORT/USER/PASSWORD`, `NOTIFY_EMAIL_TO`,
+`NOTIFY_EMAIL_FROM`.
+**Frontend** (`frontend/.env.local`): `NEXT_PUBLIC_API_BASE_URL` (FastAPI base URL,
+exposed to the browser) and `ADMIN_TOKEN` (server-only — **no** `NEXT_PUBLIC_`
+prefix; used by the admin server component so the token never reaches the browser).
+Keep `.env`/`.env.local` in `.gitignore`.
+
+### Security invariants (must hold in every feature that touches them)
+- All DB access via SQLModel/SQLAlchemy (parameterized) — never string-built SQL.
+- `session_id` is **server-minted and HMAC-signed**; endpoints verify it.
+- Admin token compared with `hmac.compare_digest` (constant-time).
+- User-supplied values are **escaped** before going into HTML/email/headers.
+- The agent never receives the admin token or secrets in its prompt.
+- `save_lead` takes `session_id` from server context, never from the user message.
+
+### Lead score formula
+BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 100.
+
+---
+
+## Build order & status
+
+| # | Feature | Status |
+|---|---------|--------|
+| F1 | Project scaffold & config | ☑ |
+| F2 | Lead model & database | ☑ |
+| F3 | BANT agent core | ☐ |
+| F4 | save_lead tool & scoring | ☐ |
+| F5 | Signed sessions & chat endpoint | ☐ |
+| F6 | Streaming chat (SSE) | ☐ |
+| F7 | Source / attribution capture | ☐ |
+| F8 | Rate limiting & CORS | ☐ |
+| F9 | Email notifications | ☐ |
+| F10 | Admin leads API (auth) | ☐ |
+| F11 | Chat widget (frontend base) | ☐ |
+| F12 | Widget UX polish | ☐ |
+| F13 | Admin dashboard (frontend) | ☐ |
+| F14 | LLM guardrails | ☐ |
+| F15 | Bot protection & spend cap | ☐ |
+| F16 | DB migrations (Alembic) | ☐ |
+| F17 | Product knowledge (RAG) | ☐ |
+| F18 | Deployment | ☐ |
+
+---
+
+## F1 — Project scaffold & config
+- **Status:** ☑  **Depends on:** —
+- **Note:** CORS dev default set to `http://localhost:3000` (this project's Next.js
+  frontend) rather than the spec's `5173` (Vite); `ALLOWED_ORIGINS` overrides it.
+  DB engines are created lazily so module import doesn't require a live DB.
+- **Goal:** A runnable FastAPI app with env loading, CORS, and a health check.
+- **Build:**
+  - `uv init`; add deps: `fastapi "uvicorn[standard]" sqlmodel "openai-agents[sqlalchemy,litellm]" asyncpg "psycopg[binary]" python-dotenv slowapi httpx`.
+  - `backend/main.py`: FastAPI app, `load_dotenv()`, CORS from `ALLOWED_ORIGINS` (default `http://localhost:5173`), `GET /health` → `{"status":"ok"}`.
+  - `.env.example` with all env vars; `.gitignore` includes `.env`.
+- **Acceptance:**
+  - [x] `uv run uvicorn backend.main:app --reload` starts cleanly.
+  - [x] `GET /health` returns `{"status":"ok"}`.
+  - [x] CORS allows the configured origin only.
+
+## F2 — Lead model & database
+- **Status:** ☑  **Depends on:** F1
+- **Note:** Engines exposed as `get_engine()` / `get_async_engine()` (lazy, cached).
+  Verified locally against SQLite (insert/query/delete); Neon URLs go in `.env`.
+- **Goal:** The `Lead` table and DB engines on Neon.
+- **Build:**
+  - `backend/db.py`: sync engine (`DATABASE_URL`, psycopg) + async engine (`ASYNC_DATABASE_URL`, asyncpg, `connect_args={"ssl": True, "statement_cache_size": 0}`); `create_db_and_tables()`.
+  - `backend/models.py`: `Lead` per the data model above (`session_id` unique).
+  - Call `create_db_and_tables()` in the app lifespan startup.
+- **Acceptance:**
+  - [x] Tables are created on startup against Neon. *(create_db_and_tables runs in
+    lifespan; verified end-to-end against SQLite — needs real Neon URL in `.env`.)*
+  - [x] A Lead can be inserted and queried.
+
+## F3 — BANT agent core
+- **Status:** ☐  **Depends on:** F1
+- **Goal:** A Gemini-backed agent that qualifies via BANT.
+- **Build:**
+  - `backend/agent/core.py`: `build_agent()` returning an `Agent` with BANT instructions, `model=LitellmModel(model=AGENT_MODEL)`, default `gemini/gemini-2.5-flash`.
+  - Instructions: warm, one question at a time, lead with NEED, mirror the user's language, collect name/email/phone + BANT, keep replies short.
+  - Call `set_tracing_disabled(True)` at app init.
+- **Acceptance:**
+  - [ ] `Runner.run(agent, "hi")` returns a sensible reply with `GEMINI_API_KEY` set.
+  - [ ] No OpenAI key is required (tracing off).
+
+## F4 — save_lead tool & scoring
+- **Status:** ☐  **Depends on:** F2, F3
+- **Goal:** The agent persists leads and scores them.
+- **Build:**
+  - `backend/agent/tools.py`: `@dataclass ChatContext(session_id, source)`; `compute_score(lead)`; `@function_tool save_lead(ctx, ...)` that **upserts by session_id**, drops empty fields, sets `score`, and (placeholder until F9) is the place where notifications will fire on the `qualified` false→true transition.
+  - Add `save_lead` to the agent's tools.
+- **Acceptance:**
+  - [ ] Through conversation, a Lead row is created/updated for the session.
+  - [ ] `score` is recomputed on each save.
+  - [ ] Calling save_lead repeatedly never creates duplicate rows.
+
+## F5 — Signed sessions & chat endpoint
+- **Status:** ☐  **Depends on:** F4
+- **Goal:** Forge-proof sessions and a working non-streaming chat.
+- **Build:**
+  - `main.py`: `SESSION_SECRET` (ephemeral fallback + warning); `sign_session`/`verify_session` (HMAC-SHA256, `hmac.compare_digest`).
+  - `POST /session` → `{ "session_id": "<sid>.<sig>" }`.
+  - `POST /chat`: verify token → bare `sid`; `SQLAlchemySession(sid, engine=async_engine, create_tables=True)`; `ChatContext(sid, source)`; `Runner.run`; wrap in try/except → graceful fallback reply on any error (incl. 429).
+  - `schemas.py`: `ChatRequest(session_id, message, page_url?, referrer?, utm_*)`, `ChatResponse(session_id, reply)`.
+- **Acceptance:**
+  - [ ] `/session` returns a signed token.
+  - [ ] `/chat` with a valid token replies and persists history; invalid/missing token → 401.
+  - [ ] A provider error yields a friendly reply, not a 500.
+
+## F6 — Streaming chat (SSE)
+- **Status:** ☐  **Depends on:** F5
+- **Goal:** Token-by-token replies.
+- **Build:**
+  - `POST /chat/stream`: same session verification; `Runner.run_streamed(...)`; iterate `result.stream_events()`, and for `event.type == "raw_response_event"` with `data.type == "response.output_text.delta"`, yield `data: {"delta": ...}`; end with `data: {"done": true}`. `StreamingResponse(media_type="text/event-stream")` + headers `Cache-Control: no-cache`, `X-Accel-Buffering: no`. Errors stream a fallback delta + done.
+- **Acceptance:**
+  - [ ] Client receives incremental `delta` events then a `done` event.
+  - [ ] Tools still run and history still persists during streaming.
+
+## F7 — Source / attribution capture
+- **Status:** ☐  **Depends on:** F4, F5
+- **Goal:** Record where each lead came from.
+- **Build:**
+  - `ChatRequest.source()` returns non-empty `page_url/referrer/utm_*`.
+  - `save_lead` writes source fields **only on lead creation** (first save), from `ctx.context.source`.
+- **Acceptance:**
+  - [ ] A lead created from a request carrying UTM params stores them.
+  - [ ] Source is not overwritten on later saves.
+
+## F8 — Rate limiting & CORS
+- **Status:** ☐  **Depends on:** F5
+- **Goal:** Basic abuse protection.
+- **Build:**
+  - slowapi `Limiter(key_func=get_remote_address)`; `app.state.limiter`; 429 handler.
+  - `@limiter.limit(CHAT_RATE_LIMIT)` (default `20/minute`) on `/chat` and `/chat/stream`; `30/minute` on `/session`. Each limited endpoint takes `request: Request`.
+- **Acceptance:**
+  - [ ] Exceeding the limit returns 429 with a friendly message.
+  - [ ] Note in code/docs: CORS is not auth; non-browser clients bypass it (covered later by F15).
+
+## F9 — Email notifications
+- **Status:** ☐  **Depends on:** F4
+- **Goal:** Email the team when a lead is newly qualified.
+- **Build:**
+  - `backend/notify.py`: `notify_qualified_lead(lead)` via `smtplib` (SSL on 465, else STARTTLS). **Escape** all user values with `html.escape` in the HTML part; strip newlines from the Subject. No-op unless `SMTP_HOST/USER/PASSWORD` and `NOTIFY_EMAIL_TO` are set. Best-effort (swallow exceptions).
+  - Wire `save_lead` to call it only on the `qualified` false→true transition (once per session).
+- **Acceptance:**
+  - [ ] Newly qualified lead triggers exactly one email.
+  - [ ] Injected HTML in a field is escaped in the email.
+  - [ ] Unconfigured SMTP → silent no-op, chat unaffected.
+
+## F10 — Admin leads API (auth)
+- **Status:** ☐  **Depends on:** F2, F8
+- **Goal:** Read leads securely.
+- **Build:**
+  - `require_admin` dependency: 503 if `ADMIN_TOKEN` unset; else `hmac.compare_digest(authorization or "", f"Bearer {ADMIN_TOKEN}")` → 401 on mismatch.
+  - `GET /leads` with `Depends(require_admin)` + `@limiter.limit("30/minute")`, sorted by `score desc, created_at desc`.
+- **Acceptance:**
+  - [ ] Valid token → list; wrong token → 401; unset token → 503.
+  - [ ] Over the limit → 429.
+
+## F11 — Chat widget (frontend base)
+- **Status:** ☐  **Depends on:** F6
+- **Goal:** A floating chat widget that talks to the backend.
+- **Build:**
+  - `npx create-next-app@latest frontend` (TypeScript + Tailwind, App Router); add `framer-motion`.
+  - `components/ChatWidget.tsx` — starts with `"use client";` (uses hooks, `localStorage`, `window`, Framer Motion). Launcher + spring-open panel; header/messages/input; on mount fetch `${NEXT_PUBLIC_API_BASE_URL}/session` and store the signed token in `localStorage`; `getSource()` reads page URL/referrer/UTM; send via `POST /chat/stream`, parse SSE deltas into the last bot bubble; typing indicator; props `apiBaseUrl, greeting, brandName`.
+  - Render `<ChatWidget apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL!} />` from `app/page.tsx`.
+  - Design: forest `#1B4332` header/launcher, honey `#E0A458` user bubbles, cream `#FBF8F3` surface, sage `#EDEFE9` bot bubbles; Fraunces (display) + Inter (body).
+- **Acceptance:**
+  - [ ] Widget opens, sends a message, and renders a streamed reply.
+  - [ ] Source params are included in the request.
+
+## F12 — Widget UX polish
+- **Status:** ☐  **Depends on:** F11
+- **Goal:** Make it feel premium.
+- **Build:** localStorage conversation persistence (per session token); quick-reply chips (`suggestions` prop) shown before first reply; proactive nudge after `nudgeAfter` seconds; accessibility (`role="dialog"`, `aria-modal`, Escape to close, focus to input on open / launcher on close, `aria-live` messages); on `401` from chat, re-mint session and retry once.
+- **Acceptance:**
+  - [ ] Conversation survives reload; chips send on tap; nudge appears; keyboard/AT basics work; 401 self-heals.
+
+## F13 — Admin dashboard (frontend)
+- **Status:** ☐  **Depends on:** F10
+- **Goal:** Review leads visually, **without exposing the admin token to the browser**.
+- **Build:**
+  - `app/admin/page.tsx` — a **server component**: reads `process.env.ADMIN_TOKEN`
+    (server-only), fetches `${NEXT_PUBLIC_API_BASE_URL}/leads` with
+    `Authorization: Bearer ${ADMIN_TOKEN}` and `cache: "no-store"`, and renders
+    `<LeadsDashboard leads={leads} />`. Handle 401/503 with a clear message.
+  - `components/LeadsDashboard.tsx` — `"use client";`, receives `leads: Lead[]` as a
+    prop (no fetching, no token in the browser). Metric cards (total, qualified,
+    rate, last 7 days); rows with score, 4-dot BANT completeness, qualified badge,
+    date; filter All/Qualified; expandable detail (BANT text, phone, notes, source).
+    "Refresh" calls `useRouter().refresh()`. Same palette.
+- **Acceptance:**
+  - [ ] `/admin` lists leads sorted best-first; filter and expand work.
+  - [ ] The admin token never appears in client JS/network (server-side fetch only).
+  - [ ] Unauthorized/misconfigured backend shows a clear message.
+
+## F14 — LLM guardrails
+- **Status:** ☐  **Depends on:** F5
+- **Goal:** Keep the agent on-topic and safe.
+- **Build:** Agents SDK input/output guardrails — reject/redirect off-topic, jailbreak, or unsafe requests; never reveal the system prompt; keep a polite on-brand refusal.
+- **Acceptance:**
+  - [ ] Off-topic/jailbreak attempts are deflected; normal lead chats unaffected.
+
+## F15 — Bot protection & spend cap
+- **Status:** ☐  **Depends on:** F8
+- **Goal:** Stop automated quota-drain and spam.
+- **Build:** A bot check (Cloudflare Turnstile / hCaptcha) or proof-of-work gating the first message; a **global daily cap** on LLM calls; consider shared-store (Redis) rate limiting for multi-instance correctness.
+- **Acceptance:**
+  - [ ] Scripted clients are blocked/limited; a daily ceiling halts spend.
+
+## F16 — DB migrations (Alembic)
+- **Status:** ☐  **Depends on:** F2
+- **Goal:** Evolve schema safely.
+- **Build:** Add Alembic; baseline migration for `Lead`; replace reliance on `create_all` for schema changes.
+- **Acceptance:**
+  - [ ] A column can be added and applied via `alembic upgrade head`.
+
+## F17 — Product knowledge (RAG)
+- **Status:** ☐  **Depends on:** F3
+- **Goal:** Let the agent answer product/FAQ questions.
+- **Build:** Ingest a product/FAQ corpus; retrieval tool the agent can call; cite/ground answers; fall back to "team will follow up" when unsure.
+- **Acceptance:**
+  - [ ] The agent answers a known product question accurately and still qualifies.
+
+## F18 — Deployment
+- **Status:** ☐  **Depends on:** most
+- **Goal:** Go live.
+- **Build:** Backend on Railway/Render/Fly (HTTPS enforced, real `ALLOWED_ORIGINS`, strong `ADMIN_TOKEN`/`SESSION_SECRET`, Gemini billing on); Next.js frontend on Vercel with `NEXT_PUBLIC_API_BASE_URL` and server-only `ADMIN_TOKEN` set; smoke-test the full flow.
+- **Acceptance:**
+  - [ ] Public URL works end-to-end over HTTPS; dashboard reachable with the token.
+
+---
+
+## Cross-cutting ambiguities (decide as they come up)
+- `qualified` (LLM judgment) and `score` (formula) are independent and can disagree — pick the source of truth for "good lead."
+- `qualified` is sticky; the email fires once per session (re-qualification won't re-notify).
+- "One lead per visitor" = one per session token per browser (localStorage); same person on two devices = two leads.
+- Capture depends on the LLM calling `save_lead`; there is no deterministic fallback parser yet.

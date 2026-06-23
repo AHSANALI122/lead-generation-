@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets / local env (never commit; .env.example is committed)
+.env
+.env.local
+
+# Frontend (Next.js, added in F11+)
+frontend/node_modules/
+frontend/.next/
