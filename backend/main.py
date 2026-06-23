@@ -20,16 +20,18 @@ from hashlib import sha256
 from agents import Agent, Runner
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from sqlmodel import Session, select
 
 from backend.agent.core import build_agent
 from backend.agent.tools import ChatContext
-from backend.db import create_db_and_tables, get_async_engine
+from backend.db import create_db_and_tables, get_async_engine, get_engine
+from backend.models import Lead
 from backend.schemas import ChatRequest, ChatResponse
 
 load_dotenv()
@@ -223,3 +225,32 @@ async def chat_stream(request: Request, req: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def require_admin(authorization: str | None = Header(default=None)) -> None:
+    """Guard the admin API (F10). Fails closed and compares in constant time.
+
+    ADMIN_TOKEN is read per request so an unset token always 503s (never silently
+    open). The Bearer credential is matched with `hmac.compare_digest` to avoid
+    timing side-channels; a mismatch (or missing header) is a 401.
+    """
+    token = os.getenv("ADMIN_TOKEN")
+    if not token:
+        raise HTTPException(status_code=503, detail="Admin API is not configured.")
+    if not hmac.compare_digest(authorization or "", f"Bearer {token}"):
+        raise HTTPException(status_code=401, detail="Invalid admin credentials.")
+
+
+@app.get("/leads", response_model=list[Lead])
+@limiter.limit("30/minute")
+async def list_leads(
+    request: Request, _: None = Depends(require_admin)
+) -> list[Lead]:
+    """Admin-only: every lead, best first (score desc, then newest).
+
+    Returns full Lead rows (incl. BANT, notes, source) for the admin dashboard (F13).
+    """
+    with Session(get_engine()) as session:
+        return session.exec(
+            select(Lead).order_by(Lead.score.desc(), Lead.created_at.desc())
+        ).all()

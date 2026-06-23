@@ -103,7 +103,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F7 | Source / attribution capture | ☑ |
 | F8 | Rate limiting & CORS | ☑ |
 | F9 | Email notifications | ☑ |
-| F10 | Admin leads API (auth) | ☐ |
+| F10 | Admin leads API (auth) | ☑ |
 | F11 | Chat widget (frontend base) | ☐ |
 | F12 | Widget UX polish | ☐ |
 | F13 | Admin dashboard (frontend) | ☐ |
@@ -270,14 +270,20 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] Unconfigured SMTP → silent no-op, chat unaffected. *(returns without connecting when SMTP env is unset.)*
 
 ## F10 — Admin leads API (auth)
-- **Status:** ☐  **Depends on:** F2, F8
+- **Status:** ☑  **Depends on:** F2, F8
+- **Note:** `require_admin` reads `ADMIN_TOKEN` via `os.getenv` per request (fails
+  closed: unset → 503 before any compare), then constant-time `hmac.compare_digest`
+  against `"Bearer <token>"` → 401 on mismatch/missing. `GET /leads` returns full
+  `Lead` rows (incl. session_id, BANT, notes, source) for the F13 dashboard;
+  `response_model=list[Lead]`. Reuses the existing slowapi limiter and F8's friendly
+  429 handler. Verified via TestClient (503/401/200 + sort, 429 over the limit).
 - **Goal:** Read leads securely.
 - **Build:**
   - `require_admin` dependency: 503 if `ADMIN_TOKEN` unset; else `hmac.compare_digest(authorization or "", f"Bearer {ADMIN_TOKEN}")` → 401 on mismatch.
   - `GET /leads` with `Depends(require_admin)` + `@limiter.limit("30/minute")`, sorted by `score desc, created_at desc`.
 - **Acceptance:**
-  - [ ] Valid token → list; wrong token → 401; unset token → 503.
-  - [ ] Over the limit → 429.
+  - [x] Valid token → list; wrong token → 401; unset token → 503. *(all three verified via TestClient.)*
+  - [x] Over the limit → 429. *(31st request within the minute returns the friendly 429.)*
 
 ## F11 — Chat widget (frontend base)
 - **Status:** ☐  **Depends on:** F6
