@@ -97,7 +97,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F1 | Project scaffold & config | ☑ |
 | F2 | Lead model & database | ☑ |
 | F3 | BANT agent core | ☑ |
-| F4 | save_lead tool & scoring | ☐ |
+| F4 | save_lead tool & scoring | ☑ |
 | F5 | Signed sessions & chat endpoint | ☐ |
 | F6 | Streaming chat (SSE) | ☐ |
 | F7 | Source / attribution capture | ☐ |
@@ -162,15 +162,21 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     with no OpenAI key set.)*
 
 ## F4 — save_lead tool & scoring
-- **Status:** ☐  **Depends on:** F2, F3
+- **Status:** ☑  **Depends on:** F2, F3
+- **Note:** DB logic factored into a plain, testable `upsert_lead` helper (the
+  decorated `save_lead` is a thin wrapper that pulls `session_id` from server context
+  only). `qualified` is sticky (never flips back to false); blank fields are dropped
+  so they never clobber collected data. `ChatContext.source` is defined but not yet
+  written onto the Lead — deferred to F7. F9 email left as a placeholder comment at
+  the false→true transition. Verified against SQLite (mirrors F2).
 - **Goal:** The agent persists leads and scores them.
 - **Build:**
   - `backend/agent/tools.py`: `@dataclass ChatContext(session_id, source)`; `compute_score(lead)`; `@function_tool save_lead(ctx, ...)` that **upserts by session_id**, drops empty fields, sets `score`, and (placeholder until F9) is the place where notifications will fire on the `qualified` false→true transition.
   - Add `save_lead` to the agent's tools.
 - **Acceptance:**
-  - [ ] Through conversation, a Lead row is created/updated for the session.
-  - [ ] `score` is recomputed on each save.
-  - [ ] Calling save_lead repeatedly never creates duplicate rows.
+  - [x] Through conversation, a Lead row is created/updated for the session.
+  - [x] `score` is recomputed on each save.
+  - [x] Calling save_lead repeatedly never creates duplicate rows.
 
 ## F5 — Signed sessions & chat endpoint
 - **Status:** ☐  **Depends on:** F4

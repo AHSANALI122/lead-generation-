@@ -15,6 +15,8 @@ import os
 from agents import Agent, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
 
+from backend.agent.tools import save_lead
+
 # No OpenAI key in this project — keep the SDK from phoning home with traces.
 set_tracing_disabled(True)
 
@@ -62,4 +64,5 @@ def build_agent() -> Agent:
         name="Lead Assistant",
         instructions=INSTRUCTIONS,
         model=LitellmModel(model=model, api_key=api_key),
+        tools=[save_lead],
     )
