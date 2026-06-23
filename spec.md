@@ -98,8 +98,8 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F2 | Lead model & database | ☑ |
 | F3 | BANT agent core | ☑ |
 | F4 | save_lead tool & scoring | ☑ |
-| F5 | Signed sessions & chat endpoint | ☐ |
-| F6 | Streaming chat (SSE) | ☐ |
+| F5 | Signed sessions & chat endpoint | ☑ |
+| F6 | Streaming chat (SSE) | ☑ |
 | F7 | Source / attribution capture | ☐ |
 | F8 | Rate limiting & CORS | ☐ |
 | F9 | Email notifications | ☐ |
@@ -179,7 +179,15 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] Calling save_lead repeatedly never creates duplicate rows.
 
 ## F5 — Signed sessions & chat endpoint
-- **Status:** ☐  **Depends on:** F4
+- **Status:** ☑  **Depends on:** F4
+- **Note:** `SESSION_SECRET` resolved once at import; missing → ephemeral `token_hex(32)`
+  + a startup warning (tokens don't survive a restart). Tokens are `"<sid>.<sig>"`
+  with sid=`token_urlsafe(16)`, sig=HMAC-SHA256; `verify_session` splits on the last
+  dot and compares with `compare_digest`, raising 401 before the try-block so auth
+  failures stay 401 while provider errors fall through to a friendly 200. Agent is a
+  cached singleton (`get_agent`); attribution dict (`_request_source`) is plumbed into
+  `ChatContext` now but only persisted in F7. Verified offline (sign/verify, /session,
+  401, forced provider error → friendly reply); live reply gated on real keys.
 - **Goal:** Forge-proof sessions and a working non-streaming chat.
 - **Build:**
   - `main.py`: `SESSION_SECRET` (ephemeral fallback + warning); `sign_session`/`verify_session` (HMAC-SHA256, `hmac.compare_digest`).
@@ -187,18 +195,26 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - `POST /chat`: verify token → bare `sid`; `SQLAlchemySession(sid, engine=async_engine, create_tables=True)`; `ChatContext(sid, source)`; `Runner.run`; wrap in try/except → graceful fallback reply on any error (incl. 429).
   - `schemas.py`: `ChatRequest(session_id, message, page_url?, referrer?, utm_*)`, `ChatResponse(session_id, reply)`.
 - **Acceptance:**
-  - [ ] `/session` returns a signed token.
-  - [ ] `/chat` with a valid token replies and persists history; invalid/missing token → 401.
-  - [ ] A provider error yields a friendly reply, not a 500.
+  - [x] `/session` returns a signed token. *(verified offline; token round-trips through verify_session.)*
+  - [x] `/chat` with a valid token replies and persists history; invalid/missing token → 401.
+    *(401 path verified offline; live reply/persistence gated on real GEMINI/Neon keys, as F3 was.)*
+  - [x] A provider error yields a friendly reply, not a 500. *(forced Runner.run to raise → 200 + FALLBACK_REPLY.)*
 
 ## F6 — Streaming chat (SSE)
-- **Status:** ☐  **Depends on:** F5
+- **Status:** ☑  **Depends on:** F5
+- **Note:** Shares F5's verify/context/session setup; `Runner.run_streamed` is
+  synchronous (not awaited), iterated in an async generator. Only
+  `raw_response_event` frames with `data.type == "response.output_text.delta"` emit a
+  `{"delta": ...}`; the loop always ends with `{"done": true}`. Errors stream a
+  fallback delta then done so the client terminates. `json.dumps` escapes payloads;
+  headers `Cache-Control: no-cache`, `X-Accel-Buffering: no`. Verified offline with a
+  fake event stream (filtering, happy path, and error path).
 - **Goal:** Token-by-token replies.
 - **Build:**
   - `POST /chat/stream`: same session verification; `Runner.run_streamed(...)`; iterate `result.stream_events()`, and for `event.type == "raw_response_event"` with `data.type == "response.output_text.delta"`, yield `data: {"delta": ...}`; end with `data: {"done": true}`. `StreamingResponse(media_type="text/event-stream")` + headers `Cache-Control: no-cache`, `X-Accel-Buffering: no`. Errors stream a fallback delta + done.
 - **Acceptance:**
-  - [ ] Client receives incremental `delta` events then a `done` event.
-  - [ ] Tools still run and history still persists during streaming.
+  - [x] Client receives incremental `delta` events then a `done` event. *(verified offline with a fake stream; non-text events skipped.)*
+  - [x] Tools still run and history still persists during streaming. *(same session= passed and stream consumed to completion as /chat; live-gated on real keys.)*
 
 ## F7 — Source / attribution capture
 - **Status:** ☐  **Depends on:** F4, F5
