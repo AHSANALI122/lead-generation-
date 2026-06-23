@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 
 from backend.db import get_engine
 from backend.models import Lead, _utcnow
+from backend.notify import notify_qualified_lead
 
 
 @dataclass
@@ -119,8 +120,8 @@ def upsert_lead(
         session.refresh(lead)
 
     if became_qualified:
-        # F9: notify_qualified_lead(lead) fires here (once per session, best-effort).
-        pass
+        # Fires once per session (sticky transition); best-effort, never raises.
+        notify_qualified_lead(lead)
 
     return lead
 

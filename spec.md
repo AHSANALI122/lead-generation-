@@ -102,7 +102,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F6 | Streaming chat (SSE) | ☑ |
 | F7 | Source / attribution capture | ☑ |
 | F8 | Rate limiting & CORS | ☑ |
-| F9 | Email notifications | ☐ |
+| F9 | Email notifications | ☑ |
 | F10 | Admin leads API (auth) | ☐ |
 | F11 | Chat widget (frontend base) | ☐ |
 | F12 | Widget UX polish | ☐ |
@@ -252,15 +252,22 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] Note in code/docs: CORS is not auth; non-browser clients bypass it (covered later by F15).
 
 ## F9 — Email notifications
-- **Status:** ☐  **Depends on:** F4
+- **Status:** ☑  **Depends on:** F4
+- **Note:** `notify_qualified_lead` is fully best-effort — it swallows its own
+  exceptions, so `upsert_lead` calls it without a guard. `_build_message` is split out
+  from the SMTP send so escaping/formatting is testable offline. `NOTIFY_EMAIL_FROM`
+  falls back to `SMTP_USER` when blank. Plain-text + escaped-HTML alternative parts;
+  Subject has newlines stripped (header-injection). Fires only on the sticky false→true
+  transition (verified: exactly once across repeated `qualified=True` saves).
+  `.env.example` already had all SMTP vars — no change needed.
 - **Goal:** Email the team when a lead is newly qualified.
 - **Build:**
   - `backend/notify.py`: `notify_qualified_lead(lead)` via `smtplib` (SSL on 465, else STARTTLS). **Escape** all user values with `html.escape` in the HTML part; strip newlines from the Subject. No-op unless `SMTP_HOST/USER/PASSWORD` and `NOTIFY_EMAIL_TO` are set. Best-effort (swallow exceptions).
   - Wire `save_lead` to call it only on the `qualified` false→true transition (once per session).
 - **Acceptance:**
-  - [ ] Newly qualified lead triggers exactly one email.
-  - [ ] Injected HTML in a field is escaped in the email.
-  - [ ] Unconfigured SMTP → silent no-op, chat unaffected.
+  - [x] Newly qualified lead triggers exactly one email. *(verified offline: counter stub fires once across three `qualified=True` saves.)*
+  - [x] Injected HTML in a field is escaped in the email. *(HTML part contains `&lt;b&gt;`, not raw `<b>`.)*
+  - [x] Unconfigured SMTP → silent no-op, chat unaffected. *(returns without connecting when SMTP env is unset.)*
 
 ## F10 — Admin leads API (auth)
 - **Status:** ☐  **Depends on:** F2, F8
