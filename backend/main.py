@@ -20,9 +20,12 @@ from hashlib import sha256
 from agents import Agent, Runner
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from backend.agent.core import build_agent
 from backend.agent.tools import ChatContext
@@ -35,6 +38,21 @@ logger = logging.getLogger(__name__)
 
 # Shown to the user when the agent or provider fails — never a stack trace (F5/F6).
 FALLBACK_REPLY = "Sorry — I hit a snag just now. Could you try again in a moment?"
+
+# Per-IP rate limiting (F8). Chat endpoints share CHAT_RATE_LIMIT; /session is a bit
+# looser. NB: this keys on the client IP, so behind a proxy it needs a trusted
+# X-Forwarded-For; and rate limiting is *not* auth — non-browser clients also bypass
+# CORS entirely (stronger bot protection is F15).
+CHAT_RATE_LIMIT = os.getenv("CHAT_RATE_LIMIT", "20/minute")
+limiter = Limiter(key_func=get_remote_address)
+
+
+def _rate_limited(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """Friendly 429 — a calm message, never slowapi's raw default."""
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "You're sending messages too quickly — please wait a moment and try again."},
+    )
 
 
 def _session_secret() -> bytes:
@@ -90,16 +108,6 @@ def get_agent() -> Agent:
     return build_agent()
 
 
-def _request_source(req: ChatRequest) -> dict[str, str | None]:
-    """Collect the non-empty attribution fields from a request.
-
-    Passed into ChatContext now; only written onto the Lead in F7 (save_lead still
-    ignores it), so this is harmless plumbing that F7 will start using.
-    """
-    fields = ("page_url", "referrer", "utm_source", "utm_medium", "utm_campaign")
-    return {f: getattr(req, f) for f in fields if getattr(req, f)}
-
-
 def _chat_session(sid: str) -> SQLAlchemySession:
     """SDK conversation memory for a session, keyed by the bare sid.
 
@@ -118,6 +126,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Lead-Gen Chatbot API", lifespan=lifespan)
 
+# Wire the limiter onto the app and route 429s to the friendly handler (F8).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limited)
+
 
 def _allowed_origins() -> list[str]:
     """Parse ALLOWED_ORIGINS (comma-separated).
@@ -129,6 +141,9 @@ def _allowed_origins() -> list[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+# CORS restricts which *browser* origins may call us; it is **not** authentication.
+# A non-browser client (curl, a script) ignores it entirely, so real protection comes
+# from signed sessions (F5), rate limiting (F8 below), and bot defenses (F15).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
@@ -144,14 +159,16 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/session")
-async def create_session() -> dict[str, str]:
+@limiter.limit("30/minute")
+async def create_session(request: Request) -> dict[str, str]:
     """Mint a fresh signed session token for a new visitor."""
     sid = secrets.token_urlsafe(16)
     return {"session_id": sign_session(sid)}
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+@limiter.limit(CHAT_RATE_LIMIT)
+async def chat(request: Request, req: ChatRequest) -> ChatResponse:
     """Non-streaming chat: verify the session, run the agent, persist history.
 
     Any failure below the auth check (provider 429, timeout, DB hiccup) is logged and
@@ -159,7 +176,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     """
     sid = verify_session(req.session_id)  # 401 before the try: auth stays 401.
     try:
-        ctx = ChatContext(session_id=sid, source=_request_source(req))
+        ctx = ChatContext(session_id=sid, source=req.source())
         result = await Runner.run(
             get_agent(), req.message, context=ctx, session=_chat_session(sid)
         )
@@ -175,7 +192,8 @@ def _sse(payload: dict) -> str:
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest) -> StreamingResponse:
+@limiter.limit(CHAT_RATE_LIMIT)
+async def chat_stream(request: Request, req: ChatRequest) -> StreamingResponse:
     """Streaming chat (SSE): emit `delta` events token-by-token, then `done`.
 
     Same session verification as /chat. Iterating the stream to completion still runs
@@ -186,7 +204,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
     async def event_stream():
         try:
-            ctx = ChatContext(session_id=sid, source=_request_source(req))
+            ctx = ChatContext(session_id=sid, source=req.source())
             result = Runner.run_streamed(
                 get_agent(), req.message, context=ctx, session=_chat_session(sid)
             )

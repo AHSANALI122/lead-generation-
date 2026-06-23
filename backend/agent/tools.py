@@ -24,8 +24,8 @@ class ChatContext:
     """Per-run server context, never exposed to the LLM.
 
     `session_id` is the bare (verified) session id used to upsert the lead. `source`
-    holds attribution (page_url / referrer / utm_*); it's defined here but only
-    written onto the Lead in F7, so it defaults to empty.
+    holds attribution (page_url / referrer / utm_*) collected by the endpoint; it's
+    written onto the Lead on first save (F7), so it defaults to empty.
     """
 
     session_id: str
@@ -66,12 +66,15 @@ def upsert_lead(
     timeline: str | None = None,
     qualified: bool | None = None,
     notes: str | None = None,
+    source: dict[str, str | None] | None = None,
 ) -> Lead:
     """Create or update the lead for `session_id`, recompute its score, and persist.
 
     Upserts on the unique `session_id`, so repeated calls never create duplicate rows.
     Only non-blank fields are applied — the agent passing a blank never clobbers data
     already collected. `qualified` is sticky: once True it never flips back to False.
+    `source` (attribution) is written **only when the lead is first created**, so a
+    visitor's original referrer/UTMs survive every later save.
     """
     # Text fields: name maps straight through; the rest mirror the BANT/contact model.
     text_updates = {
@@ -89,12 +92,18 @@ def upsert_lead(
         lead = session.exec(
             select(Lead).where(Lead.session_id == session_id)
         ).first()
+        is_new = lead is None
         if lead is None:
             lead = Lead(session_id=session_id)
 
         for attrname, value in text_updates.items():
             if _has_text(value):
                 setattr(lead, attrname, value.strip())
+
+        # Attribution is set once, at creation, so later saves can't overwrite it.
+        if is_new and source:
+            for attrname, value in source.items():
+                setattr(lead, attrname, value)
 
         # Sticky qualification: detect the false→true transition for F9's email.
         became_qualified = False
@@ -137,7 +146,7 @@ def save_lead(
     to reach them. Pass only the fields you actually learned — omit the rest. You may
     call this multiple times in a conversation; it updates the same lead.
     """
-    # Security: the session id comes from server context, never from the model.
+    # Security: session id and attribution come from server context, never the model.
     lead = upsert_lead(
         ctx.context.session_id,
         name=name,
@@ -149,5 +158,6 @@ def save_lead(
         timeline=timeline,
         qualified=qualified,
         notes=notes,
+        source=ctx.context.source,
     )
     return f"Saved lead (score {lead.score})."

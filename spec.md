@@ -100,8 +100,8 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F4 | save_lead tool & scoring | ☑ |
 | F5 | Signed sessions & chat endpoint | ☑ |
 | F6 | Streaming chat (SSE) | ☑ |
-| F7 | Source / attribution capture | ☐ |
-| F8 | Rate limiting & CORS | ☐ |
+| F7 | Source / attribution capture | ☑ |
+| F8 | Rate limiting & CORS | ☑ |
 | F9 | Email notifications | ☐ |
 | F10 | Admin leads API (auth) | ☐ |
 | F11 | Chat widget (frontend base) | ☐ |
@@ -217,24 +217,39 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] Tools still run and history still persists during streaming. *(same session= passed and stream consumed to completion as /chat; live-gated on real keys.)*
 
 ## F7 — Source / attribution capture
-- **Status:** ☐  **Depends on:** F4, F5
+- **Status:** ☑  **Depends on:** F4, F5
+- **Note:** `_request_source` helper retired in favour of `ChatRequest.source()` (the
+  attribution shape now lives on the model). `upsert_lead` gained a `source` param and
+  writes it via `setattr` **only when the row is first created** (`is_new`), so later
+  saves never clobber the original referrer/UTMs. `save_lead` passes
+  `ctx.context.source` (server context only — never a model argument). Verified offline
+  on SQLite: create stores UTMs, a later save with different source leaves them intact,
+  and a source-less create leaves the columns `None`.
 - **Goal:** Record where each lead came from.
 - **Build:**
   - `ChatRequest.source()` returns non-empty `page_url/referrer/utm_*`.
   - `save_lead` writes source fields **only on lead creation** (first save), from `ctx.context.source`.
 - **Acceptance:**
-  - [ ] A lead created from a request carrying UTM params stores them.
-  - [ ] Source is not overwritten on later saves.
+  - [x] A lead created from a request carrying UTM params stores them.
+  - [x] Source is not overwritten on later saves.
 
 ## F8 — Rate limiting & CORS
-- **Status:** ☐  **Depends on:** F5
+- **Status:** ☑  **Depends on:** F5
+- **Note:** slowapi `Limiter(key_func=get_remote_address)` wired via `app.state.limiter`
+  with a **custom** `RateLimitExceeded` handler returning a friendly 429 JSON (not
+  slowapi's raw default). `/session` 30/min; `/chat` and `/chat/stream` on
+  `CHAT_RATE_LIMIT` (default 20/min); `/health` unlimited. Each limited endpoint takes
+  `request: Request` (slowapi requires the literal name). Added a comment by the CORS
+  middleware noting CORS is **not** auth — non-browser clients bypass it (F15). Verified
+  with TestClient: limiter + handler attached, hammering `/session` yields 200s then a
+  429 carrying the friendly `detail`.
 - **Goal:** Basic abuse protection.
 - **Build:**
   - slowapi `Limiter(key_func=get_remote_address)`; `app.state.limiter`; 429 handler.
   - `@limiter.limit(CHAT_RATE_LIMIT)` (default `20/minute`) on `/chat` and `/chat/stream`; `30/minute` on `/session`. Each limited endpoint takes `request: Request`.
 - **Acceptance:**
-  - [ ] Exceeding the limit returns 429 with a friendly message.
-  - [ ] Note in code/docs: CORS is not auth; non-browser clients bypass it (covered later by F15).
+  - [x] Exceeding the limit returns 429 with a friendly message.
+  - [x] Note in code/docs: CORS is not auth; non-browser clients bypass it (covered later by F15).
 
 ## F9 — Email notifications
 - **Status:** ☐  **Depends on:** F4
