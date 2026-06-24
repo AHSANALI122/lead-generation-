@@ -259,7 +259,9 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   falls back to `SMTP_USER` when blank. Plain-text + escaped-HTML alternative parts;
   Subject has newlines stripped (header-injection). Fires only on the sticky false→true
   transition (verified: exactly once across repeated `qualified=True` saves).
-  `.env.example` already had all SMTP vars — no change needed.
+  `.env.example` already had all SMTP vars; later filled the SMTP block with a documented
+  Gmail example (placeholder values + notes on App Password, port 465, and the
+  sender-vs-recipient distinction) to ease setup.
 - **Goal:** Email the team when a lead is newly qualified.
 - **Build:**
   - `backend/notify.py`: `notify_qualified_lead(lead)` via `smtplib` (SSL on 465, else STARTTLS). **Escape** all user values with `html.escape` in the HTML part; strip newlines from the Subject. No-op unless `SMTP_HOST/USER/PASSWORD` and `NOTIFY_EMAIL_TO` are set. Best-effort (swallow exceptions).
