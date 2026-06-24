@@ -23,10 +23,21 @@ function bantCount(lead: Lead): number {
 }
 
 function formatDate(iso: string): string {
-  const d = new Date(iso);
+  // created_at/updated_at arrive as naive UTC from the backend (no offset). Append "Z" when
+  // there's no timezone marker so it parses as UTC identically on server and client, then
+  // format with a fixed locale + UTC zone. A bare `undefined` locale resolves to the
+  // runtime default (Node → en-US, browser → the user's locale), which mismatches on
+  // hydration ("Jun 24, 2026" vs "24 Jun 2026").
+  const normalized = /[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`;
+  const d = new Date(normalized);
   return Number.isNaN(d.getTime())
     ? "—"
-    : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    : d.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "UTC",
+      });
 }
 
 export default function LeadsDashboard({ leads }: LeadsDashboardProps) {
