@@ -173,6 +173,16 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    """Friendly root so hitting the base URL in a browser isn't a bare 404.
+
+    The API is consumed by the frontend at specific paths (/session, /chat, …); this
+    just confirms the service is up and points at the health check.
+    """
+    return {"service": "Lead-Gen Chatbot API", "status": "ok", "health": "/health"}
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
