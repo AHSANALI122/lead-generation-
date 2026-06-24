@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Gemini's embedding model, via LiteLLM. Overridable so the model can be swapped without
 # code changes; the key is the same GEMINI_API_KEY the chat model already uses.
-DEFAULT_EMBED_MODEL = "gemini/text-embedding-004"
+# NB: the older `text-embedding-004` 404s on the Gemini `v1beta` embedContent path, so we
+# default to the GA `gemini-embedding-001`.
+DEFAULT_EMBED_MODEL = "gemini/gemini-embedding-001"
 
 # Corpus lives next to this package, under backend/knowledge/.
 _CORPUS_PATH = Path(__file__).resolve().parent.parent / "knowledge" / "faqs.md"
