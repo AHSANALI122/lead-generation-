@@ -451,8 +451,13 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 - **Build:** Ingest a product/FAQ corpus; retrieval tool the agent can call; cite/ground answers; fall back to "team will follow up" when unsure.
 - **Decisions / notes:**
   - Retrieval is **in-memory Gemini embeddings** (via LiteLLM, `EMBED_MODEL` default
-    `gemini/text-embedding-004`), cosine similarity in pure Python — no pgvector, no DB
+    `gemini/gemini-embedding-001`), cosine similarity in pure Python — no pgvector, no DB
     table, no Alembic migration. No new pip dependency (`litellm` ships with the SDK).
+  - **Fix (post-build):** the original default `gemini/text-embedding-004` 404s on
+    Gemini's `v1beta` embedContent path, so `_embedded_corpus()` failed open to empty and
+    every product/FAQ question silently fell back to "the team will follow up". Switched the
+    default (code + `.env.example`) to the GA `gemini-embedding-001`; verified live with a
+    grounded, cited pricing answer.
   - Corpus is an authored sample at `backend/knowledge/faqs.md`; each `## ` heading is one
     chunk and its title is the citation label. Replace bodies with real content later.
   - `backend/agent/retrieval.py` loads + embeds the corpus **once per process**
