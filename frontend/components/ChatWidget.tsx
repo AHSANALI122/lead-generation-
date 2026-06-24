@@ -2,7 +2,7 @@
 
 import { Turnstile, type TurnstileInstance } from "@marsidev/react-turnstile";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 type Role = "user" | "bot";
 interface Message {
@@ -122,6 +122,16 @@ export default function ChatWidget({
   const [isStreaming, setIsStreaming] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
+  // The widget is entirely browser-driven (localStorage, window, document.referrer) and
+  // Framer Motion injects client-only attributes (e.g. tabindex) on its elements. Render
+  // nothing until mounted so the server HTML and first client render agree — otherwise
+  // hydration mismatches on the launcher button. useSyncExternalStore gives a stable
+  // server snapshot (false) and client snapshot (true) without a setState-in-effect.
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
 
   // Dedupe concurrent mints (React StrictMode double-invokes effects in dev).
   const sessionPromise = useRef<Promise<string> | null>(null);
@@ -327,6 +337,10 @@ export default function ChatWidget({
         exit: { opacity: 0, y: 20, scale: 0.95 },
         transition: { type: "spring" as const, stiffness: 260, damping: 24 },
       };
+
+  // Render nothing on the server and the first client pass; all hooks above still run, so
+  // this only gates output (keeps the Rules of Hooks intact) and avoids the hydration diff.
+  if (!mounted) return null;
 
   return (
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-4">
