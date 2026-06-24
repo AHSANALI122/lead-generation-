@@ -18,6 +18,7 @@ from functools import lru_cache
 from hashlib import sha256
 
 from agents import Agent, Runner
+from agents.exceptions import InputGuardrailTripwireTriggered
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -40,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 # Shown to the user when the agent or provider fails — never a stack trace (F5/F6).
 FALLBACK_REPLY = "Sorry — I hit a snag just now. Could you try again in a moment?"
+
+# Shown when an input guardrail trips (off-topic / jailbreak / unsafe, F14). This is a
+# deflection, not an error: stay friendly and steer back to what we can help with.
+REFUSAL_REPLY = (
+    "I'm here to help with questions about what we offer and how we can help you. "
+    "Could you tell me a bit about what you're looking for?"
+)
 
 # Per-IP rate limiting (F8). Chat endpoints share CHAT_RATE_LIMIT; /session is a bit
 # looser. NB: this keys on the client IP, so behind a proxy it needs a trusted
@@ -183,6 +191,9 @@ async def chat(request: Request, req: ChatRequest) -> ChatResponse:
             get_agent(), req.message, context=ctx, session=_chat_session(sid)
         )
         return ChatResponse(session_id=req.session_id, reply=result.final_output)
+    except InputGuardrailTripwireTriggered:
+        # Off-topic / jailbreak / unsafe (F14): deflect politely, not a 500.
+        return ChatResponse(session_id=req.session_id, reply=REFUSAL_REPLY)
     except Exception:
         logger.exception("chat failed for session %s", sid)
         return ChatResponse(session_id=req.session_id, reply=FALLBACK_REPLY)
@@ -215,6 +226,10 @@ async def chat_stream(request: Request, req: ChatRequest) -> StreamingResponse:
                     event.data.type == "response.output_text.delta"
                 ):
                     yield _sse({"delta": event.data.delta})
+        except InputGuardrailTripwireTriggered:
+            # Sequential guardrail trips before any delta (F14), so the visitor sees the
+            # polite refusal instead of partial content.
+            yield _sse({"delta": REFUSAL_REPLY})
         except Exception:
             logger.exception("chat stream failed for session %s", sid)
             yield _sse({"delta": FALLBACK_REPLY})

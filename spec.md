@@ -107,7 +107,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F11 | Chat widget (frontend base) | ☑ |
 | F12 | Widget UX polish | ☑ |
 | F13 | Admin dashboard (frontend) | ☑ |
-| F14 | LLM guardrails | ☐ |
+| F14 | LLM guardrails | ☑ |
 | F15 | Bot protection & spend cap | ☐ |
 | F16 | DB migrations (Alembic) | ☐ |
 | F17 | Product knowledge (RAG) | ☐ |
@@ -372,11 +372,28 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     other and missing token/apiBase each render a friendly `<Notice>`, no trace.)*
 
 ## F14 — LLM guardrails
-- **Status:** ☐  **Depends on:** F5
+- **Status:** ☑  **Depends on:** F5
+- **Note:** Hybrid **input** guardrail in `backend/agent/guardrails.py`,
+  `@input_guardrail(run_in_parallel=False)` so it completes before the model — the
+  tripwire is caught by the endpoints before any reply/delta. Stage 1 is a free regex
+  blocklist (jailbreak / prompt-leak / role-change markers); stage 2 is a tiny cached
+  Gemini classifier agent (`output_type=OnTopicCheck{on_topic,reason}`) for nuanced
+  off-topic cases, and it **fails open** if the provider errors (never blocks a real
+  visitor over infra). The classifier is built independently of `core.py` to avoid an
+  import cycle. **No output guardrail** — on `/chat/stream` tokens are already sent
+  before a final-output check could fire, so prompt-leak defense is hardened in
+  `core.py` INSTRUCTIONS instead. `main.py` catches `InputGuardrailTripwireTriggered`
+  before the generic handler: `/chat` → 200 + `REFUSAL_REPLY`; `/chat/stream` → refusal
+  delta + `done`. No new env vars (no kill-switch added). Verified: heuristic trips
+  with no LLM call; live classifier marks a real pricing question on-topic; endpoint
+  tests confirm refusal on both paths and 401 still precedes the guardrail.
 - **Goal:** Keep the agent on-topic and safe.
 - **Build:** Agents SDK input/output guardrails — reject/redirect off-topic, jailbreak, or unsafe requests; never reveal the system prompt; keep a polite on-brand refusal.
 - **Acceptance:**
-  - [ ] Off-topic/jailbreak attempts are deflected; normal lead chats unaffected.
+  - [x] Off-topic/jailbreak attempts are deflected; normal lead chats unaffected.
+    *(jailbreak → heuristic tripwire (no LLM); live classifier → on-topic for a real
+    pricing message; `/chat` returns REFUSAL_REPLY and `/chat/stream` emits a refusal
+    delta + done when the tripwire fires; auth 401 still precedes guardrail logic.)*
 
 ## F15 — Bot protection & spend cap
 - **Status:** ☐  **Depends on:** F8
