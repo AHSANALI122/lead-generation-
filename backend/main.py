@@ -21,7 +21,7 @@ from agents import Agent, Runner
 from agents.exceptions import InputGuardrailTripwireTriggered
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from slowapi import Limiter
@@ -31,9 +31,11 @@ from sqlmodel import Session, select
 
 from backend.agent.core import build_agent
 from backend.agent.tools import ChatContext
+from backend.botcheck import verify_turnstile
 from backend.db import create_db_and_tables, get_async_engine, get_engine
 from backend.models import Lead
-from backend.schemas import ChatRequest, ChatResponse
+from backend.schemas import ChatRequest, ChatResponse, SessionRequest
+from backend.spend import check_and_reserve_call
 
 load_dotenv()
 
@@ -47,6 +49,13 @@ FALLBACK_REPLY = "Sorry — I hit a snag just now. Could you try again in a mome
 REFUSAL_REPLY = (
     "I'm here to help with questions about what we offer and how we can help you. "
     "Could you tell me a bit about what you're looking for?"
+)
+
+# Shown when the global daily LLM-call cap is reached (F15). A calm "try later", not an
+# error — the visitor did nothing wrong; we've simply hit today's spend ceiling.
+CAPACITY_REPLY = (
+    "Thanks for reaching out! We've reached our capacity for today — "
+    "please check back tomorrow and we'll be glad to help."
 )
 
 # Per-IP rate limiting (F8). Chat endpoints share CHAT_RATE_LIMIT; /session is a bit
@@ -170,8 +179,19 @@ async def health() -> dict[str, str]:
 
 @app.post("/session")
 @limiter.limit("30/minute")
-async def create_session(request: Request) -> dict[str, str]:
-    """Mint a fresh signed session token for a new visitor."""
+async def create_session(
+    request: Request, body: SessionRequest | None = Body(default=None)
+) -> dict[str, str]:
+    """Mint a fresh signed session token for a new visitor.
+
+    Gated by a Cloudflare Turnstile check (F15): a bot that can't solve the challenge
+    never gets a session, and the signed token then proves humanity for every later
+    message. When TURNSTILE_SECRET_KEY is unset the check is disabled (dev/no-op).
+    """
+    token = body.turnstile_token if body else None
+    client_ip = request.client.host if request.client else None
+    if not await verify_turnstile(token, client_ip):
+        raise HTTPException(status_code=403, detail="Bot check failed — please reload and try again.")
     sid = secrets.token_urlsafe(16)
     return {"session_id": sign_session(sid)}
 
@@ -185,6 +205,10 @@ async def chat(request: Request, req: ChatRequest) -> ChatResponse:
     turned into a friendly reply rather than a 500 — the visitor never sees a trace.
     """
     sid = verify_session(req.session_id)  # 401 before the try: auth stays 401.
+    # Global daily spend cap (F15): refuse before any model call (agent or guardrail)
+    # once the day's ceiling is reached. A friendly 200, never a 500.
+    if not check_and_reserve_call():
+        return ChatResponse(session_id=req.session_id, reply=CAPACITY_REPLY)
     try:
         ctx = ChatContext(session_id=sid, source=req.source())
         result = await Runner.run(
@@ -216,6 +240,12 @@ async def chat_stream(request: Request, req: ChatRequest) -> StreamingResponse:
     sid = verify_session(req.session_id)  # 401 before streaming begins.
 
     async def event_stream():
+        # Global daily spend cap (F15): emit a friendly message + done before any model
+        # call once the day's ceiling is reached, so the client still terminates cleanly.
+        if not check_and_reserve_call():
+            yield _sse({"delta": CAPACITY_REPLY})
+            yield _sse({"done": True})
+            return
         try:
             ctx = ChatContext(session_id=sid, source=req.source())
             result = Runner.run_streamed(

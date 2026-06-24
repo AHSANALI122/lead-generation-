@@ -1,5 +1,6 @@
 "use client";
 
+import { Turnstile, type TurnstileInstance } from "@marsidev/react-turnstile";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
@@ -20,6 +21,8 @@ interface ChatWidgetProps {
   suggestions?: string[];
   /** Seconds of inactivity before a proactive nudge appears (0/undefined = off, F12). */
   nudgeAfter?: number;
+  /** Cloudflare Turnstile site key (F15). Omit to disable the bot check (dev). */
+  turnstileSiteKey?: string;
 }
 
 const DEFAULT_GREETING = "Hi there 👋 I'm here to help. What brings you in today?";
@@ -55,11 +58,19 @@ function getSource(): Record<string, string> {
 }
 
 /**
- * Mint a fresh signed session token. `forceNew` drops any stored token first — used by
- * the 401 self-heal when the existing token no longer verifies (F12).
+ * Mint a fresh signed session token, posting the Cloudflare Turnstile token so the
+ * backend can verify the visitor is human before issuing a session (F15). `token` is
+ * null when bot protection is disabled (no site key); the backend then no-ops the check.
  */
-async function mintSession(apiBaseUrl: string): Promise<string> {
-  const res = await fetch(`${apiBaseUrl}/session`, { method: "POST" });
+async function mintSession(
+  apiBaseUrl: string,
+  token: string | null,
+): Promise<string> {
+  const res = await fetch(`${apiBaseUrl}/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ turnstile_token: token }),
+  });
   if (!res.ok) throw new Error(`session mint failed: ${res.status}`);
   const data: { session_id: string } = await res.json();
   localStorage.setItem(SESSION_KEY, data.session_id);
@@ -101,6 +112,7 @@ export default function ChatWidget({
   brandName = DEFAULT_BRAND,
   suggestions = [],
   nudgeAfter,
+  turnstileSiteKey,
 }: ChatWidgetProps) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -113,6 +125,7 @@ export default function ChatWidget({
 
   // Dedupe concurrent mints (React StrictMode double-invokes effects in dev).
   const sessionPromise = useRef<Promise<string> | null>(null);
+  const turnstileRef = useRef<TurnstileInstance | null>(null);
   const scrollAnchor = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const launcherRef = useRef<HTMLButtonElement | null>(null);
@@ -123,15 +136,30 @@ export default function ChatWidget({
 
   const reduce = useReducedMotion();
 
+  // Resolve a fresh Turnstile token, or null when bot protection is disabled (F15).
+  // Failures resolve to null so /session returns 403 and the error surfaces on send.
+  const getTurnstileToken = async (): Promise<string | null> => {
+    if (!turnstileSiteKey) return null;
+    try {
+      return (await turnstileRef.current?.getResponsePromise()) ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   const ensureSession = (forceNew = false): Promise<string> => {
     if (forceNew) {
       sessionPromise.current = null;
       localStorage.removeItem(SESSION_KEY);
+      // Turnstile tokens are single-use, so reset for a fresh one before re-minting.
+      turnstileRef.current?.reset();
     }
     if (!sessionPromise.current) {
       const existing = forceNew ? null : localStorage.getItem(SESSION_KEY);
       sessionPromise.current = (
-        existing ? Promise.resolve(existing) : mintSession(apiBaseUrl)
+        existing
+          ? Promise.resolve(existing)
+          : getTurnstileToken().then((t) => mintSession(apiBaseUrl, t))
       ).then((sid) => {
         setSessionToken(sid);
         hydrate(sid);
@@ -413,6 +441,18 @@ export default function ChatWidget({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Bot check (F15): Turnstile runs on mount (execution defaults to "render") so a
+          token is ready by the time the visitor sends; the signed session it unlocks
+          proves humanity thereafter. "interaction-only" keeps it invisible unless a
+          challenge is actually needed. Rendered only when a site key is configured. */}
+      {turnstileSiteKey && (
+        <Turnstile
+          ref={turnstileRef}
+          siteKey={turnstileSiteKey}
+          options={{ appearance: "interaction-only" }}
+        />
+      )}
 
       {/* Launcher */}
       <motion.button

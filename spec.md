@@ -108,7 +108,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F12 | Widget UX polish | ☑ |
 | F13 | Admin dashboard (frontend) | ☑ |
 | F14 | LLM guardrails | ☑ |
-| F15 | Bot protection & spend cap | ☐ |
+| F15 | Bot protection & spend cap | ☑ |
 | F16 | DB migrations (Alembic) | ☐ |
 | F17 | Product knowledge (RAG) | ☐ |
 | F18 | Deployment | ☐ |
@@ -396,11 +396,31 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     delta + done when the tripwire fires; auth 401 still precedes guardrail logic.)*
 
 ## F15 — Bot protection & spend cap
-- **Status:** ☐  **Depends on:** F8
+- **Status:** ☑  **Depends on:** F8
+- **Note:** Bot check is **Cloudflare Turnstile gating `/session`** (not the first
+  message) — the signed token then proves humanity for every later message, fitting the
+  existing signed-session design. `backend/botcheck.py::verify_turnstile` no-ops when
+  `TURNSTILE_SECRET_KEY` is unset (dev, like SMTP) and **fails closed** on a verify error
+  (opposite of the F14 guardrail, since it only blocks the cheap, retryable mint). The
+  widget renders an `appearance:"interaction-only"` Turnstile (invisible unless
+  challenged) via `@marsidev/react-turnstile`, posts the token in the `/session` body,
+  and `reset()`s it before any 401 re-mint (tokens are single-use). Spend cap is a
+  **DB-backed daily counter** (`DailyUsage`, one row per UTC day) bumped with an atomic
+  `INSERT … ON CONFLICT (day)` in `backend/spend.py`, so it's correct across instances;
+  checked **once per chat request** (before the agent/guardrail) and **fails open** on a
+  DB error. Unset `DAILY_LLM_CALL_CAP` = no cap (zero extra DB work). slowapi stays
+  in-memory per-instance — shared/Redis limiting deferred to F18. New env:
+  `TURNSTILE_SECRET_KEY`, `DAILY_LLM_CALL_CAP` (backend), `NEXT_PUBLIC_TURNSTILE_SITE_KEY`
+  (frontend). `DailyUsage` is created by `create_all` for now; F16's baseline captures it.
 - **Goal:** Stop automated quota-drain and spam.
 - **Build:** A bot check (Cloudflare Turnstile / hCaptcha) or proof-of-work gating the first message; a **global daily cap** on LLM calls; consider shared-store (Redis) rate limiting for multi-instance correctness.
 - **Acceptance:**
-  - [ ] Scripted clients are blocked/limited; a daily ceiling halts spend.
+  - [x] Scripted clients are blocked/limited; a daily ceiling halts spend. *(offline
+    TestClient: `/session` 403s on a failed Turnstile check and 200s on pass, no-ops when
+    disabled; `/chat` returns `CAPACITY_REPLY` and `/chat/stream` emits a capacity delta +
+    `done` when over cap — without invoking the agent; live Cloudflare verify + the atomic
+    Neon counter are external-gated as in prior features. Frontend `npm run lint`/`build`
+    clean.)*
 
 ## F16 — DB migrations (Alembic)
 - **Status:** ☐  **Depends on:** F2

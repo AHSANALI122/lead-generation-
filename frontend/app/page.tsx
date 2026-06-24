@@ -18,6 +18,7 @@ export default function Home() {
 
       <ChatWidget
         apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL!}
+        turnstileSiteKey={process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY}
         suggestions={[
           "I'm exploring options",
           "I need pricing",

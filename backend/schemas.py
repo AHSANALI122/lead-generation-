@@ -38,3 +38,9 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
+
+
+class SessionRequest(BaseModel):
+    # Cloudflare Turnstile token from the widget (F15). Optional so the no-body dev
+    # path still works when bot protection is disabled (TURNSTILE_SECRET_KEY unset).
+    turnstile_token: str | None = None
