@@ -109,7 +109,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F13 | Admin dashboard (frontend) | ☑ |
 | F14 | LLM guardrails | ☑ |
 | F15 | Bot protection & spend cap | ☑ |
-| F16 | DB migrations (Alembic) | ☐ |
+| F16 | DB migrations (Alembic) | ☑ |
 | F17 | Product knowledge (RAG) | ☐ |
 | F18 | Deployment | ☐ |
 
@@ -423,11 +423,27 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     clean.)*
 
 ## F16 — DB migrations (Alembic)
-- **Status:** ☐  **Depends on:** F2
+- **Status:** ☑  **Depends on:** F2
+- **Note:** Alembic added at the project root (`alembic.ini` + `alembic/`). `env.py`
+  runs against the **sync** `DATABASE_URL` (psycopg), read from the environment via
+  `load_dotenv()` so **no DB URL lives in `alembic.ini`**. `target_metadata =
+  SQLModel.metadata` (populated by `import backend.models`) so autogenerate sees `Lead`
+  and `DailyUsage`. **Critical:** the SDK's `agent_sessions`/`agent_messages` memory
+  tables aren't in our metadata, so an `include_name` filter excludes them — otherwise
+  autogenerate would emit DROPs. `script.py.mako` adds `import sqlmodel` so generated ops
+  using `AutoString` resolve. The startup `create_db_and_tables()` call was **removed**
+  from the lifespan (the function stays in `db.py` for ad-hoc/test use); schema is now
+  applied with `alembic upgrade head`. Workflow in `CLAUDE.md` Commands: fresh DB →
+  `upgrade head`; an existing DB already built by the old `create_all` → `stamp head`.
+  Baseline `52db5c201eaf` creates `lead` + `dailyusage`.
 - **Goal:** Evolve schema safely.
 - **Build:** Add Alembic; baseline migration for `Lead`; replace reliance on `create_all` for schema changes.
 - **Acceptance:**
-  - [ ] A column can be added and applied via `alembic upgrade head`.
+  - [x] A column can be added and applied via `alembic upgrade head`. *(verified on a
+    throwaway SQLite DB: `upgrade head` created `lead` + `dailyusage`; adding a probe
+    column to `Lead` → `--autogenerate` detected only `lead.<col>` (no SDK tables) →
+    `upgrade head` applied it → `downgrade -1` reverted. Live Neon run is external-gated
+    as in prior features. Probe column + migration reverted, leaving only the baseline.)*
 
 ## F17 — Product knowledge (RAG)
 - **Status:** ☐  **Depends on:** F3

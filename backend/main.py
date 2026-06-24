@@ -32,7 +32,7 @@ from sqlmodel import Session, select
 from backend.agent.core import build_agent
 from backend.agent.tools import ChatContext
 from backend.botcheck import verify_turnstile
-from backend.db import create_db_and_tables, get_async_engine, get_engine
+from backend.db import get_async_engine, get_engine
 from backend.models import Lead
 from backend.schemas import ChatRequest, ChatResponse, SessionRequest
 from backend.spend import check_and_reserve_call
@@ -138,8 +138,9 @@ def _chat_session(sid: str) -> SQLAlchemySession:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables on startup (F2). No-op if they already exist.
-    create_db_and_tables()
+    # Schema is managed by Alembic now (F16): run `alembic upgrade head` to create or
+    # migrate the Lead/DailyUsage tables before serving. (The Agents SDK still creates
+    # its own conversation-memory tables at runtime via create_tables=True.)
     yield
 
 

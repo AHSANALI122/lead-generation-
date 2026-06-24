@@ -47,6 +47,11 @@ uv add fastapi "uvicorn[standard]" sqlmodel "openai-agents[sqlalchemy,litellm]" 
 # Run backend
 uv run uvicorn backend.main:app --reload
 
+# Database migrations (F16 — schema is managed by Alembic, not create_all)
+uv run alembic upgrade head                       # apply migrations (run before serving)
+uv run alembic revision --autogenerate -m "..."   # after a models.py change; review the file
+uv run alembic stamp head                          # mark an already-populated DB as up to date
+
 # Syntax check before finishing
 python -m py_compile backend/*.py backend/agent/*.py
 

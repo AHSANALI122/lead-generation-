@@ -49,6 +49,9 @@ def create_db_and_tables() -> None:
 
     Importing models here guarantees the Lead table is registered on the metadata
     before create_all runs.
+
+    As of F16, schema is managed by Alembic (`alembic upgrade head`) and the app no
+    longer calls this on startup; it's kept for ad-hoc local/test setup only.
     """
     import backend.models  # noqa: F401  (registers tables on SQLModel.metadata)
 
