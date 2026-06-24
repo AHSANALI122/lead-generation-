@@ -106,7 +106,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F10 | Admin leads API (auth) | ☑ |
 | F11 | Chat widget (frontend base) | ☑ |
 | F12 | Widget UX polish | ☑ |
-| F13 | Admin dashboard (frontend) | ☐ |
+| F13 | Admin dashboard (frontend) | ☑ |
 | F14 | LLM guardrails | ☐ |
 | F15 | Bot protection & spend cap | ☐ |
 | F16 | DB migrations (Alembic) | ☐ |
@@ -339,7 +339,17 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     against the live backend — tampered token → 401 → re-mint + retry.)*
 
 ## F13 — Admin dashboard (frontend)
-- **Status:** ☐  **Depends on:** F10
+- **Status:** ☑  **Depends on:** F10
+- **Note:** `/admin` is a server component (`export const dynamic = "force-dynamic"`)
+  that reads server-only `ADMIN_TOKEN`, fetches `/leads` with `cache: "no-store"`, and
+  maps 401/503/network/other to clear `<Notice>` copy (never a trace).
+  `components/LeadsDashboard.tsx` is `"use client"`, receives `leads` as a prop, and
+  never sees the token (grep confirms `ADMIN_TOKEN` appears only in the server page +
+  `.env.local.example`). Shared `Lead` type in `lib/types.ts`. Metric cards / All|Qualified
+  filter / 4-dot BANT / expandable detail; Refresh uses `useRouter().refresh()` wrapped in
+  `useTransition`. "Last 7 days" uses a lazy `useState(() => Date.now())` because Next 16's
+  React purity lint forbids calling `Date.now()` during render. `npm run lint` + `npm run
+  build` clean; `/admin` builds as a dynamic (ƒ) route.
 - **Goal:** Review leads visually, **without exposing the admin token to the browser**.
 - **Build:**
   - `app/admin/page.tsx` — a **server component**: reads `process.env.ADMIN_TOKEN`
@@ -352,9 +362,14 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     date; filter All/Qualified; expandable detail (BANT text, phone, notes, source).
     "Refresh" calls `useRouter().refresh()`. Same palette.
 - **Acceptance:**
-  - [ ] `/admin` lists leads sorted best-first; filter and expand work.
-  - [ ] The admin token never appears in client JS/network (server-side fetch only).
-  - [ ] Unauthorized/misconfigured backend shows a clear message.
+  - [x] `/admin` lists leads sorted best-first; filter and expand work. *(API sends
+    score desc, created_at desc; All|Qualified filter + expandable detail implemented;
+    build clean. Live list gated on a real ADMIN_TOKEN/Neon, as prior features were.)*
+  - [x] The admin token never appears in client JS/network (server-side fetch only).
+    *(fetch + Bearer header live only in the server component; `ADMIN_TOKEN` grep hits
+    only the server page + `.env.local.example`; `LeadsDashboard` takes data props only.)*
+  - [x] Unauthorized/misconfigured backend shows a clear message. *(401/503/network/
+    other and missing token/apiBase each render a friendly `<Notice>`, no trace.)*
 
 ## F14 — LLM guardrails
 - **Status:** ☐  **Depends on:** F5
