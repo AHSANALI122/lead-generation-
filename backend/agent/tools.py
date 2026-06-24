@@ -15,8 +15,18 @@ from dataclasses import dataclass, field
 from agents import RunContextWrapper, function_tool
 from sqlmodel import Session, select
 
+from backend.agent import retrieval
 from backend.db import get_engine
 from backend.models import Lead, _utcnow
+from backend.notify import notify_qualified_lead
+
+# Returned by search_knowledge when nothing in the corpus is relevant. The agent treats
+# this as a hard signal to fall back ("the team will follow up") instead of guessing.
+NO_RELEVANT_INFO = (
+    "NO_RELEVANT_INFO: nothing in the knowledge base matched. Do not guess — tell the "
+    "visitor you'll have the team follow up with details, and use it as a natural moment "
+    "to capture their name and an email or phone number."
+)
 
 
 @dataclass
@@ -24,8 +34,8 @@ class ChatContext:
     """Per-run server context, never exposed to the LLM.
 
     `session_id` is the bare (verified) session id used to upsert the lead. `source`
-    holds attribution (page_url / referrer / utm_*); it's defined here but only
-    written onto the Lead in F7, so it defaults to empty.
+    holds attribution (page_url / referrer / utm_*) collected by the endpoint; it's
+    written onto the Lead on first save (F7), so it defaults to empty.
     """
 
     session_id: str
@@ -66,12 +76,15 @@ def upsert_lead(
     timeline: str | None = None,
     qualified: bool | None = None,
     notes: str | None = None,
+    source: dict[str, str | None] | None = None,
 ) -> Lead:
     """Create or update the lead for `session_id`, recompute its score, and persist.
 
     Upserts on the unique `session_id`, so repeated calls never create duplicate rows.
     Only non-blank fields are applied — the agent passing a blank never clobbers data
     already collected. `qualified` is sticky: once True it never flips back to False.
+    `source` (attribution) is written **only when the lead is first created**, so a
+    visitor's original referrer/UTMs survive every later save.
     """
     # Text fields: name maps straight through; the rest mirror the BANT/contact model.
     text_updates = {
@@ -89,12 +102,18 @@ def upsert_lead(
         lead = session.exec(
             select(Lead).where(Lead.session_id == session_id)
         ).first()
+        is_new = lead is None
         if lead is None:
             lead = Lead(session_id=session_id)
 
         for attrname, value in text_updates.items():
             if _has_text(value):
                 setattr(lead, attrname, value.strip())
+
+        # Attribution is set once, at creation, so later saves can't overwrite it.
+        if is_new and source:
+            for attrname, value in source.items():
+                setattr(lead, attrname, value)
 
         # Sticky qualification: detect the false→true transition for F9's email.
         became_qualified = False
@@ -110,8 +129,8 @@ def upsert_lead(
         session.refresh(lead)
 
     if became_qualified:
-        # F9: notify_qualified_lead(lead) fires here (once per session, best-effort).
-        pass
+        # Fires once per session (sticky transition); best-effort, never raises.
+        notify_qualified_lead(lead)
 
     return lead
 
@@ -137,7 +156,7 @@ def save_lead(
     to reach them. Pass only the fields you actually learned — omit the rest. You may
     call this multiple times in a conversation; it updates the same lead.
     """
-    # Security: the session id comes from server context, never from the model.
+    # Security: session id and attribution come from server context, never the model.
     lead = upsert_lead(
         ctx.context.session_id,
         name=name,
@@ -149,5 +168,25 @@ def save_lead(
         timeline=timeline,
         qualified=qualified,
         notes=notes,
+        source=ctx.context.source,
     )
     return f"Saved lead (score {lead.score})."
+
+
+@function_tool
+def search_knowledge(query: str) -> str:
+    """Look up factual product information to answer the visitor accurately.
+
+    Call this BEFORE answering any factual question about the product — pricing, plans,
+    features, integrations, security/compliance, support, SLAs, onboarding, limits, or
+    similar. Never answer such questions from your own memory; always ground them in what
+    this tool returns. Pass the visitor's question (or the key terms) as `query`.
+
+    Returns one or more `Source: "<title>"` blocks to ground and cite your answer in, or
+    a NO_RELEVANT_INFO message — in which case do not invent an answer.
+    """
+    hits = retrieval.search(query)
+    if not hits:
+        return NO_RELEVANT_INFO
+    # One block per hit; the title doubles as the citation label for the agent to quote.
+    return "\n\n".join(f'Source: "{hit.title}"\n{hit.text}' for hit in hits)

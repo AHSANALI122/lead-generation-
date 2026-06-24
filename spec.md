@@ -98,19 +98,19 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F2 | Lead model & database | ☑ |
 | F3 | BANT agent core | ☑ |
 | F4 | save_lead tool & scoring | ☑ |
-| F5 | Signed sessions & chat endpoint | ☐ |
-| F6 | Streaming chat (SSE) | ☐ |
-| F7 | Source / attribution capture | ☐ |
-| F8 | Rate limiting & CORS | ☐ |
-| F9 | Email notifications | ☐ |
-| F10 | Admin leads API (auth) | ☐ |
-| F11 | Chat widget (frontend base) | ☐ |
-| F12 | Widget UX polish | ☐ |
-| F13 | Admin dashboard (frontend) | ☐ |
-| F14 | LLM guardrails | ☐ |
-| F15 | Bot protection & spend cap | ☐ |
-| F16 | DB migrations (Alembic) | ☐ |
-| F17 | Product knowledge (RAG) | ☐ |
+| F5 | Signed sessions & chat endpoint | ☑ |
+| F6 | Streaming chat (SSE) | ☑ |
+| F7 | Source / attribution capture | ☑ |
+| F8 | Rate limiting & CORS | ☑ |
+| F9 | Email notifications | ☑ |
+| F10 | Admin leads API (auth) | ☑ |
+| F11 | Chat widget (frontend base) | ☑ |
+| F12 | Widget UX polish | ☑ |
+| F13 | Admin dashboard (frontend) | ☑ |
+| F14 | LLM guardrails | ☑ |
+| F15 | Bot protection & spend cap | ☑ |
+| F16 | DB migrations (Alembic) | ☑ |
+| F17 | Product knowledge (RAG) | ☑ |
 | F18 | Deployment | ☐ |
 
 ---
@@ -179,7 +179,15 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - [x] Calling save_lead repeatedly never creates duplicate rows.
 
 ## F5 — Signed sessions & chat endpoint
-- **Status:** ☐  **Depends on:** F4
+- **Status:** ☑  **Depends on:** F4
+- **Note:** `SESSION_SECRET` resolved once at import; missing → ephemeral `token_hex(32)`
+  + a startup warning (tokens don't survive a restart). Tokens are `"<sid>.<sig>"`
+  with sid=`token_urlsafe(16)`, sig=HMAC-SHA256; `verify_session` splits on the last
+  dot and compares with `compare_digest`, raising 401 before the try-block so auth
+  failures stay 401 while provider errors fall through to a friendly 200. Agent is a
+  cached singleton (`get_agent`); attribution dict (`_request_source`) is plumbed into
+  `ChatContext` now but only persisted in F7. Verified offline (sign/verify, /session,
+  401, forced provider error → friendly reply); live reply gated on real keys.
 - **Goal:** Forge-proof sessions and a working non-streaming chat.
 - **Build:**
   - `main.py`: `SESSION_SECRET` (ephemeral fallback + warning); `sign_session`/`verify_session` (HMAC-SHA256, `hmac.compare_digest`).
@@ -187,62 +195,114 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - `POST /chat`: verify token → bare `sid`; `SQLAlchemySession(sid, engine=async_engine, create_tables=True)`; `ChatContext(sid, source)`; `Runner.run`; wrap in try/except → graceful fallback reply on any error (incl. 429).
   - `schemas.py`: `ChatRequest(session_id, message, page_url?, referrer?, utm_*)`, `ChatResponse(session_id, reply)`.
 - **Acceptance:**
-  - [ ] `/session` returns a signed token.
-  - [ ] `/chat` with a valid token replies and persists history; invalid/missing token → 401.
-  - [ ] A provider error yields a friendly reply, not a 500.
+  - [x] `/session` returns a signed token. *(verified offline; token round-trips through verify_session.)*
+  - [x] `/chat` with a valid token replies and persists history; invalid/missing token → 401.
+    *(401 path verified offline; live reply/persistence gated on real GEMINI/Neon keys, as F3 was.)*
+  - [x] A provider error yields a friendly reply, not a 500. *(forced Runner.run to raise → 200 + FALLBACK_REPLY.)*
 
 ## F6 — Streaming chat (SSE)
-- **Status:** ☐  **Depends on:** F5
+- **Status:** ☑  **Depends on:** F5
+- **Note:** Shares F5's verify/context/session setup; `Runner.run_streamed` is
+  synchronous (not awaited), iterated in an async generator. Only
+  `raw_response_event` frames with `data.type == "response.output_text.delta"` emit a
+  `{"delta": ...}`; the loop always ends with `{"done": true}`. Errors stream a
+  fallback delta then done so the client terminates. `json.dumps` escapes payloads;
+  headers `Cache-Control: no-cache`, `X-Accel-Buffering: no`. Verified offline with a
+  fake event stream (filtering, happy path, and error path).
 - **Goal:** Token-by-token replies.
 - **Build:**
   - `POST /chat/stream`: same session verification; `Runner.run_streamed(...)`; iterate `result.stream_events()`, and for `event.type == "raw_response_event"` with `data.type == "response.output_text.delta"`, yield `data: {"delta": ...}`; end with `data: {"done": true}`. `StreamingResponse(media_type="text/event-stream")` + headers `Cache-Control: no-cache`, `X-Accel-Buffering: no`. Errors stream a fallback delta + done.
 - **Acceptance:**
-  - [ ] Client receives incremental `delta` events then a `done` event.
-  - [ ] Tools still run and history still persists during streaming.
+  - [x] Client receives incremental `delta` events then a `done` event. *(verified offline with a fake stream; non-text events skipped.)*
+  - [x] Tools still run and history still persists during streaming. *(same session= passed and stream consumed to completion as /chat; live-gated on real keys.)*
 
 ## F7 — Source / attribution capture
-- **Status:** ☐  **Depends on:** F4, F5
+- **Status:** ☑  **Depends on:** F4, F5
+- **Note:** `_request_source` helper retired in favour of `ChatRequest.source()` (the
+  attribution shape now lives on the model). `upsert_lead` gained a `source` param and
+  writes it via `setattr` **only when the row is first created** (`is_new`), so later
+  saves never clobber the original referrer/UTMs. `save_lead` passes
+  `ctx.context.source` (server context only — never a model argument). Verified offline
+  on SQLite: create stores UTMs, a later save with different source leaves them intact,
+  and a source-less create leaves the columns `None`.
 - **Goal:** Record where each lead came from.
 - **Build:**
   - `ChatRequest.source()` returns non-empty `page_url/referrer/utm_*`.
   - `save_lead` writes source fields **only on lead creation** (first save), from `ctx.context.source`.
 - **Acceptance:**
-  - [ ] A lead created from a request carrying UTM params stores them.
-  - [ ] Source is not overwritten on later saves.
+  - [x] A lead created from a request carrying UTM params stores them.
+  - [x] Source is not overwritten on later saves.
 
 ## F8 — Rate limiting & CORS
-- **Status:** ☐  **Depends on:** F5
+- **Status:** ☑  **Depends on:** F5
+- **Note:** slowapi `Limiter(key_func=get_remote_address)` wired via `app.state.limiter`
+  with a **custom** `RateLimitExceeded` handler returning a friendly 429 JSON (not
+  slowapi's raw default). `/session` 30/min; `/chat` and `/chat/stream` on
+  `CHAT_RATE_LIMIT` (default 20/min); `/health` unlimited. Each limited endpoint takes
+  `request: Request` (slowapi requires the literal name). Added a comment by the CORS
+  middleware noting CORS is **not** auth — non-browser clients bypass it (F15). Verified
+  with TestClient: limiter + handler attached, hammering `/session` yields 200s then a
+  429 carrying the friendly `detail`.
 - **Goal:** Basic abuse protection.
 - **Build:**
   - slowapi `Limiter(key_func=get_remote_address)`; `app.state.limiter`; 429 handler.
   - `@limiter.limit(CHAT_RATE_LIMIT)` (default `20/minute`) on `/chat` and `/chat/stream`; `30/minute` on `/session`. Each limited endpoint takes `request: Request`.
 - **Acceptance:**
-  - [ ] Exceeding the limit returns 429 with a friendly message.
-  - [ ] Note in code/docs: CORS is not auth; non-browser clients bypass it (covered later by F15).
+  - [x] Exceeding the limit returns 429 with a friendly message.
+  - [x] Note in code/docs: CORS is not auth; non-browser clients bypass it (covered later by F15).
 
 ## F9 — Email notifications
-- **Status:** ☐  **Depends on:** F4
+- **Status:** ☑  **Depends on:** F4
+- **Note:** `notify_qualified_lead` is fully best-effort — it swallows its own
+  exceptions, so `upsert_lead` calls it without a guard. `_build_message` is split out
+  from the SMTP send so escaping/formatting is testable offline. `NOTIFY_EMAIL_FROM`
+  falls back to `SMTP_USER` when blank. Plain-text + escaped-HTML alternative parts;
+  Subject has newlines stripped (header-injection). Fires only on the sticky false→true
+  transition (verified: exactly once across repeated `qualified=True` saves).
+  `.env.example` already had all SMTP vars; later filled the SMTP block with a documented
+  Gmail example (placeholder values + notes on App Password, port 465, and the
+  sender-vs-recipient distinction) to ease setup.
 - **Goal:** Email the team when a lead is newly qualified.
 - **Build:**
   - `backend/notify.py`: `notify_qualified_lead(lead)` via `smtplib` (SSL on 465, else STARTTLS). **Escape** all user values with `html.escape` in the HTML part; strip newlines from the Subject. No-op unless `SMTP_HOST/USER/PASSWORD` and `NOTIFY_EMAIL_TO` are set. Best-effort (swallow exceptions).
   - Wire `save_lead` to call it only on the `qualified` false→true transition (once per session).
 - **Acceptance:**
-  - [ ] Newly qualified lead triggers exactly one email.
-  - [ ] Injected HTML in a field is escaped in the email.
-  - [ ] Unconfigured SMTP → silent no-op, chat unaffected.
+  - [x] Newly qualified lead triggers exactly one email. *(verified offline: counter stub fires once across three `qualified=True` saves.)*
+  - [x] Injected HTML in a field is escaped in the email. *(HTML part contains `&lt;b&gt;`, not raw `<b>`.)*
+  - [x] Unconfigured SMTP → silent no-op, chat unaffected. *(returns without connecting when SMTP env is unset.)*
 
 ## F10 — Admin leads API (auth)
-- **Status:** ☐  **Depends on:** F2, F8
+- **Status:** ☑  **Depends on:** F2, F8
+- **Note:** `require_admin` reads `ADMIN_TOKEN` via `os.getenv` per request (fails
+  closed: unset → 503 before any compare), then constant-time `hmac.compare_digest`
+  against `"Bearer <token>"` → 401 on mismatch/missing. `GET /leads` returns full
+  `Lead` rows (incl. session_id, BANT, notes, source) for the F13 dashboard;
+  `response_model=list[Lead]`. Reuses the existing slowapi limiter and F8's friendly
+  429 handler. Verified via TestClient (503/401/200 + sort, 429 over the limit).
 - **Goal:** Read leads securely.
 - **Build:**
   - `require_admin` dependency: 503 if `ADMIN_TOKEN` unset; else `hmac.compare_digest(authorization or "", f"Bearer {ADMIN_TOKEN}")` → 401 on mismatch.
   - `GET /leads` with `Depends(require_admin)` + `@limiter.limit("30/minute")`, sorted by `score desc, created_at desc`.
 - **Acceptance:**
-  - [ ] Valid token → list; wrong token → 401; unset token → 503.
-  - [ ] Over the limit → 429.
+  - [x] Valid token → list; wrong token → 401; unset token → 503. *(all three verified via TestClient.)*
+  - [x] Over the limit → 429. *(31st request within the minute returns the friendly 429.)*
 
 ## F11 — Chat widget (frontend base)
-- **Status:** ☐  **Depends on:** F6
+- **Status:** ☑  **Depends on:** F6
+- **Note:** Scaffolded with `create-next-app@latest` → Next 16 / React 19 / **Tailwind
+  v4** (CSS-first config: brand palette + fonts live in `@theme` in `app/globals.css`,
+  no `tailwind.config.ts`). Fonts via `next/font/google` (Fraunces display + Inter
+  body) wired to `font-display`/`font-body` utilities. The backend serves SSE over
+  **POST**, so `EventSource` can't be used — the widget streams with `fetch` +
+  `response.body.getReader()` and a small frame parser (`readStream`) that buffers
+  partial frames and stops on `{done:true}`. `getSource()` mirrors the backend's
+  `source()` (drops blanks). Session minting is deduped via a promise ref (React 19
+  StrictMode double-invokes effects). Verified end-to-end against the live backend:
+  `/session` mints a token and `/chat/stream` returns `delta` frames then `done`; the
+  request carried all source params. Live LLM *text* is gated on Neon being reachable
+  (the agent's SDK session needs the async DB) — in this run Neon's host failed DNS, so
+  the backend streamed its friendly fallback, which the widget rendered correctly. Same
+  external gating as F2–F6.
 - **Goal:** A floating chat widget that talks to the backend.
 - **Build:**
   - `npx create-next-app@latest frontend` (TypeScript + Tailwind, App Router); add `framer-motion`.
@@ -250,18 +310,48 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
   - Render `<ChatWidget apiBaseUrl={process.env.NEXT_PUBLIC_API_BASE_URL!} />` from `app/page.tsx`.
   - Design: forest `#1B4332` header/launcher, honey `#E0A458` user bubbles, cream `#FBF8F3` surface, sage `#EDEFE9` bot bubbles; Fraunces (display) + Inter (body).
 - **Acceptance:**
-  - [ ] Widget opens, sends a message, and renders a streamed reply.
-  - [ ] Source params are included in the request.
+  - [x] Widget opens, sends a message, and renders a streamed reply. *(streaming path
+    verified against the live backend; the rendered reply was the backend's fallback
+    because Neon was unreachable — widget behaviour is correct either way.)*
+  - [x] Source params are included in the request. *(page_url, referrer, utm_* sent in
+    the `/chat/stream` body and accepted by the backend.)*
 
 ## F12 — Widget UX polish
-- **Status:** ☐  **Depends on:** F11
+- **Status:** ☑  **Depends on:** F11
+- **Note:** All additions layer onto `components/ChatWidget.tsx`; no backend change.
+  Persistence keys conversation by the session **token** (`lead_chat:<token>`), so a
+  re-minted session naturally starts a fresh thread; a `dirty` ref gates writes so the
+  hydration pass never clobbers stored history with the bare greeting, and writes only
+  happen on settled (non-streaming) state. Hydration runs in the session-resolution
+  callback (not an effect body) to satisfy Next 16's `react-hooks/set-state-in-effect`
+  rule. Chips (`suggestions` prop) show only until the first user message; proactive
+  nudge (`nudgeAfter` seconds) fires once via timer and is dismissed by opening or the
+  ✕. A11y: panel `role="dialog"`/`aria-modal`/`aria-labelledby`, Escape closes, focus
+  moves to the input on open and back to the launcher on close, messages container is
+  `role="log"` + `aria-live="polite"`, and `useReducedMotion()` drops springs/looping
+  dot animation. 401 self-heal: a `401` from `/chat/stream` re-mints once and retries
+  the same message. Verified: `npm run lint` + `npm run build` clean; the 401 trigger
+  confirmed against the live backend (tampered token → 401, valid → 200).
 - **Goal:** Make it feel premium.
 - **Build:** localStorage conversation persistence (per session token); quick-reply chips (`suggestions` prop) shown before first reply; proactive nudge after `nudgeAfter` seconds; accessibility (`role="dialog"`, `aria-modal`, Escape to close, focus to input on open / launcher on close, `aria-live` messages); on `401` from chat, re-mint session and retry once.
 - **Acceptance:**
-  - [ ] Conversation survives reload; chips send on tap; nudge appears; keyboard/AT basics work; 401 self-heals.
+  - [x] Conversation survives reload; chips send on tap; nudge appears; keyboard/AT
+    basics work; 401 self-heals. *(persistence/chips/nudge/focus/Escape/aria-live/
+    reduced-motion implemented and type-/lint-clean; 401 self-heal trigger verified
+    against the live backend — tampered token → 401 → re-mint + retry.)*
 
 ## F13 — Admin dashboard (frontend)
-- **Status:** ☐  **Depends on:** F10
+- **Status:** ☑  **Depends on:** F10
+- **Note:** `/admin` is a server component (`export const dynamic = "force-dynamic"`)
+  that reads server-only `ADMIN_TOKEN`, fetches `/leads` with `cache: "no-store"`, and
+  maps 401/503/network/other to clear `<Notice>` copy (never a trace).
+  `components/LeadsDashboard.tsx` is `"use client"`, receives `leads` as a prop, and
+  never sees the token (grep confirms `ADMIN_TOKEN` appears only in the server page +
+  `.env.local.example`). Shared `Lead` type in `lib/types.ts`. Metric cards / All|Qualified
+  filter / 4-dot BANT / expandable detail; Refresh uses `useRouter().refresh()` wrapped in
+  `useTransition`. "Last 7 days" uses a lazy `useState(() => Date.now())` because Next 16's
+  React purity lint forbids calling `Date.now()` during render. `npm run lint` + `npm run
+  build` clean; `/admin` builds as a dynamic (ƒ) route.
 - **Goal:** Review leads visually, **without exposing the admin token to the browser**.
 - **Build:**
   - `app/admin/page.tsx` — a **server component**: reads `process.env.ADMIN_TOKEN`
@@ -274,37 +364,118 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     date; filter All/Qualified; expandable detail (BANT text, phone, notes, source).
     "Refresh" calls `useRouter().refresh()`. Same palette.
 - **Acceptance:**
-  - [ ] `/admin` lists leads sorted best-first; filter and expand work.
-  - [ ] The admin token never appears in client JS/network (server-side fetch only).
-  - [ ] Unauthorized/misconfigured backend shows a clear message.
+  - [x] `/admin` lists leads sorted best-first; filter and expand work. *(API sends
+    score desc, created_at desc; All|Qualified filter + expandable detail implemented;
+    build clean. Live list gated on a real ADMIN_TOKEN/Neon, as prior features were.)*
+  - [x] The admin token never appears in client JS/network (server-side fetch only).
+    *(fetch + Bearer header live only in the server component; `ADMIN_TOKEN` grep hits
+    only the server page + `.env.local.example`; `LeadsDashboard` takes data props only.)*
+  - [x] Unauthorized/misconfigured backend shows a clear message. *(401/503/network/
+    other and missing token/apiBase each render a friendly `<Notice>`, no trace.)*
 
 ## F14 — LLM guardrails
-- **Status:** ☐  **Depends on:** F5
+- **Status:** ☑  **Depends on:** F5
+- **Note:** Hybrid **input** guardrail in `backend/agent/guardrails.py`,
+  `@input_guardrail(run_in_parallel=False)` so it completes before the model — the
+  tripwire is caught by the endpoints before any reply/delta. Stage 1 is a free regex
+  blocklist (jailbreak / prompt-leak / role-change markers); stage 2 is a tiny cached
+  Gemini classifier agent (`output_type=OnTopicCheck{on_topic,reason}`) for nuanced
+  off-topic cases, and it **fails open** if the provider errors (never blocks a real
+  visitor over infra). The classifier is built independently of `core.py` to avoid an
+  import cycle. **No output guardrail** — on `/chat/stream` tokens are already sent
+  before a final-output check could fire, so prompt-leak defense is hardened in
+  `core.py` INSTRUCTIONS instead. `main.py` catches `InputGuardrailTripwireTriggered`
+  before the generic handler: `/chat` → 200 + `REFUSAL_REPLY`; `/chat/stream` → refusal
+  delta + `done`. No new env vars (no kill-switch added). Verified: heuristic trips
+  with no LLM call; live classifier marks a real pricing question on-topic; endpoint
+  tests confirm refusal on both paths and 401 still precedes the guardrail.
 - **Goal:** Keep the agent on-topic and safe.
 - **Build:** Agents SDK input/output guardrails — reject/redirect off-topic, jailbreak, or unsafe requests; never reveal the system prompt; keep a polite on-brand refusal.
 - **Acceptance:**
-  - [ ] Off-topic/jailbreak attempts are deflected; normal lead chats unaffected.
+  - [x] Off-topic/jailbreak attempts are deflected; normal lead chats unaffected.
+    *(jailbreak → heuristic tripwire (no LLM); live classifier → on-topic for a real
+    pricing message; `/chat` returns REFUSAL_REPLY and `/chat/stream` emits a refusal
+    delta + done when the tripwire fires; auth 401 still precedes guardrail logic.)*
 
 ## F15 — Bot protection & spend cap
-- **Status:** ☐  **Depends on:** F8
+- **Status:** ☑  **Depends on:** F8
+- **Note:** Bot check is **Cloudflare Turnstile gating `/session`** (not the first
+  message) — the signed token then proves humanity for every later message, fitting the
+  existing signed-session design. `backend/botcheck.py::verify_turnstile` no-ops when
+  `TURNSTILE_SECRET_KEY` is unset (dev, like SMTP) and **fails closed** on a verify error
+  (opposite of the F14 guardrail, since it only blocks the cheap, retryable mint). The
+  widget renders an `appearance:"interaction-only"` Turnstile (invisible unless
+  challenged) via `@marsidev/react-turnstile`, posts the token in the `/session` body,
+  and `reset()`s it before any 401 re-mint (tokens are single-use). Spend cap is a
+  **DB-backed daily counter** (`DailyUsage`, one row per UTC day) bumped with an atomic
+  `INSERT … ON CONFLICT (day)` in `backend/spend.py`, so it's correct across instances;
+  checked **once per chat request** (before the agent/guardrail) and **fails open** on a
+  DB error. Unset `DAILY_LLM_CALL_CAP` = no cap (zero extra DB work). slowapi stays
+  in-memory per-instance — shared/Redis limiting deferred to F18. New env:
+  `TURNSTILE_SECRET_KEY`, `DAILY_LLM_CALL_CAP` (backend), `NEXT_PUBLIC_TURNSTILE_SITE_KEY`
+  (frontend). `DailyUsage` is created by `create_all` for now; F16's baseline captures it.
 - **Goal:** Stop automated quota-drain and spam.
 - **Build:** A bot check (Cloudflare Turnstile / hCaptcha) or proof-of-work gating the first message; a **global daily cap** on LLM calls; consider shared-store (Redis) rate limiting for multi-instance correctness.
 - **Acceptance:**
-  - [ ] Scripted clients are blocked/limited; a daily ceiling halts spend.
+  - [x] Scripted clients are blocked/limited; a daily ceiling halts spend. *(offline
+    TestClient: `/session` 403s on a failed Turnstile check and 200s on pass, no-ops when
+    disabled; `/chat` returns `CAPACITY_REPLY` and `/chat/stream` emits a capacity delta +
+    `done` when over cap — without invoking the agent; live Cloudflare verify + the atomic
+    Neon counter are external-gated as in prior features. Frontend `npm run lint`/`build`
+    clean.)*
 
 ## F16 — DB migrations (Alembic)
-- **Status:** ☐  **Depends on:** F2
+- **Status:** ☑  **Depends on:** F2
+- **Note:** Alembic added at the project root (`alembic.ini` + `alembic/`). `env.py`
+  runs against the **sync** `DATABASE_URL` (psycopg), read from the environment via
+  `load_dotenv()` so **no DB URL lives in `alembic.ini`**. `target_metadata =
+  SQLModel.metadata` (populated by `import backend.models`) so autogenerate sees `Lead`
+  and `DailyUsage`. **Critical:** the SDK's `agent_sessions`/`agent_messages` memory
+  tables aren't in our metadata, so an `include_name` filter excludes them — otherwise
+  autogenerate would emit DROPs. `script.py.mako` adds `import sqlmodel` so generated ops
+  using `AutoString` resolve. The startup `create_db_and_tables()` call was **removed**
+  from the lifespan (the function stays in `db.py` for ad-hoc/test use); schema is now
+  applied with `alembic upgrade head`. Workflow in `CLAUDE.md` Commands: fresh DB →
+  `upgrade head`; an existing DB already built by the old `create_all` → `stamp head`.
+  Baseline `52db5c201eaf` creates `lead` + `dailyusage`.
 - **Goal:** Evolve schema safely.
 - **Build:** Add Alembic; baseline migration for `Lead`; replace reliance on `create_all` for schema changes.
 - **Acceptance:**
-  - [ ] A column can be added and applied via `alembic upgrade head`.
+  - [x] A column can be added and applied via `alembic upgrade head`. *(verified on a
+    throwaway SQLite DB: `upgrade head` created `lead` + `dailyusage`; adding a probe
+    column to `Lead` → `--autogenerate` detected only `lead.<col>` (no SDK tables) →
+    `upgrade head` applied it → `downgrade -1` reverted. Live Neon run is external-gated
+    as in prior features. Probe column + migration reverted, leaving only the baseline.)*
 
 ## F17 — Product knowledge (RAG)
-- **Status:** ☐  **Depends on:** F3
+- **Status:** ☑  **Depends on:** F3
 - **Goal:** Let the agent answer product/FAQ questions.
 - **Build:** Ingest a product/FAQ corpus; retrieval tool the agent can call; cite/ground answers; fall back to "team will follow up" when unsure.
+- **Decisions / notes:**
+  - Retrieval is **in-memory Gemini embeddings** (via LiteLLM, `EMBED_MODEL` default
+    `gemini/gemini-embedding-001`), cosine similarity in pure Python — no pgvector, no DB
+    table, no Alembic migration. No new pip dependency (`litellm` ships with the SDK).
+  - **Fix (post-build):** the original default `gemini/text-embedding-004` 404s on
+    Gemini's `v1beta` embedContent path, so `_embedded_corpus()` failed open to empty and
+    every product/FAQ question silently fell back to "the team will follow up". Switched the
+    default (code + `.env.example`) to the GA `gemini-embedding-001`; verified live with a
+    grounded, cited pricing answer.
+  - Corpus is an authored sample at `backend/knowledge/faqs.md`; each `## ` heading is one
+    chunk and its title is the citation label. Replace bodies with real content later.
+  - `backend/agent/retrieval.py` loads + embeds the corpus **once per process**
+    (`lru_cache`) and **fails open** (returns `[]`, logs server-side) on any embedding
+    error — mirroring the F14 guardrail fallback. `search()` returns `[]` when nothing
+    clears `KNOWLEDGE_MIN_SCORE` (default 0.55; `KNOWLEDGE_TOP_K` default 3).
+  - New `search_knowledge` tool (`backend/agent/tools.py`) takes only the query string
+    (no session/secret) and returns `Source: "<title>"` blocks, or a `NO_RELEVANT_INFO`
+    sentinel that deterministically drives the agent's "team will follow up" fallback.
+    `core.py` registers the tool and instructs: search first, ground + cite, never guess,
+    keep qualifying.
+  - Accepted simplification: query embeddings aren't separately metered against
+    `DAILY_LLM_CALL_CAP` (F15) — the chat request already reserved a call, and corpus
+    embedding is once-per-process.
 - **Acceptance:**
-  - [ ] The agent answers a known product question accurately and still qualifies.
+  - [x] The agent answers a known product question accurately and still qualifies.
 
 ## F18 — Deployment
 - **Status:** ☐  **Depends on:** most

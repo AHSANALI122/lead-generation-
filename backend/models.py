@@ -2,9 +2,12 @@
 
 One `Lead` row per chat session (upserted by `session_id` in F4). Fields are mostly
 optional because the agent fills them in progressively as the BANT conversation unfolds.
+
+`DailyUsage` (F15) is one row per UTC day holding a running count of LLM-backed chat
+requests, so a global daily cap can halt spend even across restarts/instances.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlmodel import Field, SQLModel
 
@@ -45,3 +48,15 @@ class Lead(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class DailyUsage(SQLModel, table=True):
+    """Running count of LLM-backed chat requests for a single UTC day (F15).
+
+    The spend cap upserts on `day` and compares the running `count` to
+    `DAILY_LLM_CALL_CAP`. Keyed by the date itself so the upsert is naturally atomic
+    (`INSERT ... ON CONFLICT (day)`), which keeps the cap correct across instances.
+    """
+
+    day: date = Field(primary_key=True)
+    count: int = Field(default=0)
