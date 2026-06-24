@@ -110,7 +110,7 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
 | F14 | LLM guardrails | ☑ |
 | F15 | Bot protection & spend cap | ☑ |
 | F16 | DB migrations (Alembic) | ☑ |
-| F17 | Product knowledge (RAG) | ☐ |
+| F17 | Product knowledge (RAG) | ☑ |
 | F18 | Deployment | ☐ |
 
 ---
@@ -446,11 +446,29 @@ BANT signals 15 each (60) + has contact (email or phone) 25 + qualified 15, cap 
     as in prior features. Probe column + migration reverted, leaving only the baseline.)*
 
 ## F17 — Product knowledge (RAG)
-- **Status:** ☐  **Depends on:** F3
+- **Status:** ☑  **Depends on:** F3
 - **Goal:** Let the agent answer product/FAQ questions.
 - **Build:** Ingest a product/FAQ corpus; retrieval tool the agent can call; cite/ground answers; fall back to "team will follow up" when unsure.
+- **Decisions / notes:**
+  - Retrieval is **in-memory Gemini embeddings** (via LiteLLM, `EMBED_MODEL` default
+    `gemini/text-embedding-004`), cosine similarity in pure Python — no pgvector, no DB
+    table, no Alembic migration. No new pip dependency (`litellm` ships with the SDK).
+  - Corpus is an authored sample at `backend/knowledge/faqs.md`; each `## ` heading is one
+    chunk and its title is the citation label. Replace bodies with real content later.
+  - `backend/agent/retrieval.py` loads + embeds the corpus **once per process**
+    (`lru_cache`) and **fails open** (returns `[]`, logs server-side) on any embedding
+    error — mirroring the F14 guardrail fallback. `search()` returns `[]` when nothing
+    clears `KNOWLEDGE_MIN_SCORE` (default 0.55; `KNOWLEDGE_TOP_K` default 3).
+  - New `search_knowledge` tool (`backend/agent/tools.py`) takes only the query string
+    (no session/secret) and returns `Source: "<title>"` blocks, or a `NO_RELEVANT_INFO`
+    sentinel that deterministically drives the agent's "team will follow up" fallback.
+    `core.py` registers the tool and instructs: search first, ground + cite, never guess,
+    keep qualifying.
+  - Accepted simplification: query embeddings aren't separately metered against
+    `DAILY_LLM_CALL_CAP` (F15) — the chat request already reserved a call, and corpus
+    embedding is once-per-process.
 - **Acceptance:**
-  - [ ] The agent answers a known product question accurately and still qualifies.
+  - [x] The agent answers a known product question accurately and still qualifies.
 
 ## F18 — Deployment
 - **Status:** ☐  **Depends on:** most

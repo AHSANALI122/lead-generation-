@@ -15,9 +15,18 @@ from dataclasses import dataclass, field
 from agents import RunContextWrapper, function_tool
 from sqlmodel import Session, select
 
+from backend.agent import retrieval
 from backend.db import get_engine
 from backend.models import Lead, _utcnow
 from backend.notify import notify_qualified_lead
+
+# Returned by search_knowledge when nothing in the corpus is relevant. The agent treats
+# this as a hard signal to fall back ("the team will follow up") instead of guessing.
+NO_RELEVANT_INFO = (
+    "NO_RELEVANT_INFO: nothing in the knowledge base matched. Do not guess — tell the "
+    "visitor you'll have the team follow up with details, and use it as a natural moment "
+    "to capture their name and an email or phone number."
+)
 
 
 @dataclass
@@ -162,3 +171,22 @@ def save_lead(
         source=ctx.context.source,
     )
     return f"Saved lead (score {lead.score})."
+
+
+@function_tool
+def search_knowledge(query: str) -> str:
+    """Look up factual product information to answer the visitor accurately.
+
+    Call this BEFORE answering any factual question about the product — pricing, plans,
+    features, integrations, security/compliance, support, SLAs, onboarding, limits, or
+    similar. Never answer such questions from your own memory; always ground them in what
+    this tool returns. Pass the visitor's question (or the key terms) as `query`.
+
+    Returns one or more `Source: "<title>"` blocks to ground and cite your answer in, or
+    a NO_RELEVANT_INFO message — in which case do not invent an answer.
+    """
+    hits = retrieval.search(query)
+    if not hits:
+        return NO_RELEVANT_INFO
+    # One block per hit; the title doubles as the citation label for the agent to quote.
+    return "\n\n".join(f'Source: "{hit.title}"\n{hit.text}' for hit in hits)
